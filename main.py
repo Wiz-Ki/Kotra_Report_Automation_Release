@@ -3,7 +3,25 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from config import BASE_DIR, DEFAULT_CONFIG, DEFAULT_DOWNLOAD_DIR, DEFAULT_INPUT_EXCEL, DEFAULT_LOG_DIR
+from config import (
+    BASE_DIR,
+    DEFAULT_CONFIG,
+    DEFAULT_DOWNLOAD_DIR,
+    DEFAULT_INPUT_EXCEL,
+    DEFAULT_LOG_DIR,
+    MAX_PARALLEL_SESSIONS,
+)
+
+
+def parallel_session_count(value: str) -> int:
+    try:
+        count = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("병렬 세션 수는 숫자여야 합니다.") from exc
+
+    if count < 1 or count > MAX_PARALLEL_SESSIONS:
+        raise argparse.ArgumentTypeError(f"병렬 세션 수는 1~{MAX_PARALLEL_SESSIONS} 사이여야 합니다.")
+    return count
 
 
 def resolve_default_input() -> Path:
@@ -26,6 +44,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--use-storage-state", action="store_true", help="state.json 브라우저 세션을 사용하고 실행 후 다시 저장합니다.")
     parser.add_argument("--no-storage-state", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--retry-failed", action="store_true", help="logs/failed_rows.xlsx에 기록된 실패 행만 다시 실행합니다.")
+    parser.add_argument("--parallel-sessions", type=parallel_session_count, default=1, help=f"동시에 실행할 브라우저 세션 수(1~{MAX_PARALLEL_SESSIONS})")
     parser.add_argument("--create-template", action="store_true", help="input_template.xlsx를 생성하고 종료합니다.")
     return parser
 
@@ -75,6 +94,7 @@ def main() -> None:
         save_storage_state=use_storage_state,
         retry_failed_only=args.retry_failed,
         wait_for_manual_login=args.login_wait,
+        parallel_sessions=args.parallel_sessions,
     )
 
     print("작업이 완료되었습니다.")

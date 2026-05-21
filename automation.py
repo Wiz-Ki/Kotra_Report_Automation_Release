@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import queue
 import re
 import importlib.util
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from decimal import Decimal, InvalidOperation
 from datetime import datetime
 from pathlib import Path
@@ -22,6 +25,7 @@ from config import (
     ELEMENT_TIMEOUT_MS,
     GENERATION_RETRY_COUNT,
     KOTRA_REPORT_URL,
+    MAX_PARALLEL_SESSIONS,
     PAGE_LOAD_TIMEOUT_MS,
     TIMEOUT_MS,
 )
@@ -77,6 +81,7 @@ STATUS_PENDING = "처리 안됨"
 STATUS_RUNNING = "처리 중"
 STATUS_SUCCESS = "처리완료"
 STATUS_FAILED = "처리실패"
+PARALLEL_WAIT_SUMMARY_INTERVAL_SECONDS = 30
 
 
 class GenerationError(RuntimeError):
@@ -684,6 +689,315 @@ def process_row(
     raise RuntimeError("보고서 생성 재시도 후에도 실패했습니다.") from last_error
 
 
+def normalize_parallel_sessions(parallel_sessions: int) -> int:
+    try:
+        count = int(parallel_sessions)
+    except (TypeError, ValueError):
+        return 1
+    return max(1, min(MAX_PARALLEL_SESSIONS, count))
+
+
+def prepare_parallel_storage_state(
+    state_path: Path,
+    headless: bool,
+    emit_status: StatusCallback,
+) -> bool:
+    if headless:
+        emit_status("백그라운드 실행에서는 수동 로그인 대기를 건너뜁니다.")
+        return False
+
+    with sync_playwright() as playwright:
+        browser = launch_browser(playwright, headless, emit_status)
+        context = browser.new_context(accept_downloads=True)
+        page = context.new_page()
+        page.set_default_navigation_timeout(PAGE_LOAD_TIMEOUT_MS)
+        page.set_default_timeout(ELEMENT_TIMEOUT_MS)
+        try:
+            emit_status("병렬 실행 전 로그인 세션을 준비합니다.")
+            open_site(page)
+            ensure_initial_form(page, emit_status)
+            emit_status("로그인이 필요하면 브라우저에서 직접 로그인한 뒤 Enter를 누르세요.")
+            input("로그인 완료 후 Enter를 누르세요: ")
+            ensure_initial_form(page, emit_status)
+            context.storage_state(path=str(state_path))
+            emit_status(f"로그인 세션을 저장했습니다: {state_path}")
+            return True
+        finally:
+            context.close()
+            browser.close()
+
+
+def run_parallel_automation(
+    input_excel_path: Path,
+    download_dir: Path,
+    headless: bool,
+    *,
+    log_dir: Path,
+    state_path: Path,
+    rows: list[dict[str, Any]],
+    timeout_ms: int,
+    retry_count: int,
+    use_storage_state: bool,
+    save_storage_state: bool,
+    retry_failed_only: bool,
+    wait_for_manual_login: bool,
+    parallel_sessions: int,
+    status_callback: StatusCallback | None,
+    progress_callback: ProgressCallback | None,
+    stop_requested: StopFlag | None,
+    force_stop_requested: StopFlag | None,
+) -> dict[str, int]:
+    total = len(rows)
+    worker_count = min(normalize_parallel_sessions(parallel_sessions), total)
+    row_queue: queue.Queue[tuple[int, dict[str, Any]]] = queue.Queue()
+    for row_number, row_data in enumerate(rows, start=1):
+        row_queue.put((row_number, row_data))
+
+    counter_lock = threading.Lock()
+    file_lock = threading.Lock()
+    storage_state_lock = threading.Lock()
+    wait_status_lock = threading.Lock()
+    wait_statuses: dict[int, tuple[str, int]] = {}
+    storage_state_saved = False
+    active_workers = worker_count
+    success_count = 0
+    failed_count = 0
+    completed_count = 0
+    last_wait_summary_at = 0.0
+
+    def emit_status(message: str) -> None:
+        if status_callback:
+            status_callback(message)
+        else:
+            print(message)
+
+    def emit_progress(status: str = "") -> None:
+        if not progress_callback:
+            return
+        with counter_lock:
+            progress_callback(
+                {
+                    "total": total,
+                    "current": completed_count,
+                    "success": success_count,
+                    "failed": failed_count,
+                    "status": status,
+                }
+            )
+
+    def mark_result(success: bool) -> None:
+        nonlocal success_count, failed_count, completed_count
+        with counter_lock:
+            if success:
+                success_count += 1
+            else:
+                failed_count += 1
+            completed_count += 1
+
+    def clear_wait_status(session_id: int) -> None:
+        with wait_status_lock:
+            wait_statuses.pop(session_id, None)
+
+    def emit_wait_summary(session_id: int, row_label: str, elapsed: int) -> None:
+        nonlocal last_wait_summary_at
+        now = datetime.now().timestamp()
+        with wait_status_lock:
+            wait_statuses[session_id] = (row_label, elapsed)
+            if now - last_wait_summary_at < PARALLEL_WAIT_SUMMARY_INTERVAL_SECONDS:
+                return
+            last_wait_summary_at = now
+            parts = [
+                f"세션 {item_session_id}({item_row_label}, {item_elapsed}초)"
+                for item_session_id, (item_row_label, item_elapsed) in sorted(wait_statuses.items())
+            ]
+        emit_progress("생성 대기 중: " + ", ".join(parts))
+
+    def emit_row_progress(session_id: int, row_label: str, prefix: str, message: str) -> None:
+        match = re.search(r"보고서 생성 중입니다\. 경과 (\d+)초", message)
+        if match:
+            emit_wait_summary(session_id, row_label, int(match.group(1)))
+            return
+
+        if "PDF 저장 버튼" in message or "PDF 다운로드" in message or "오류 화면" in message or "초기 입력 화면" in message:
+            clear_wait_status(session_id)
+        emit_progress(f"{prefix} {message}")
+
+    def combined_force_stop_requested() -> bool:
+        return bool(force_stop_requested and force_stop_requested())
+
+    def should_stop_before_next_row() -> bool:
+        return bool(stop_requested and stop_requested()) or combined_force_stop_requested()
+
+    if wait_for_manual_login:
+        prepared = prepare_parallel_storage_state(state_path, headless, emit_status)
+        use_storage_state = use_storage_state or prepared
+
+    emit_status(f"병렬 처리 모드로 실행합니다: {worker_count}개 세션")
+    emit_progress("병렬 처리 준비 중")
+
+    def finish_worker(context: Any, session_id: int) -> None:
+        nonlocal active_workers, storage_state_saved
+        with storage_state_lock:
+            active_workers -= 1
+            should_save = save_storage_state and not storage_state_saved and active_workers == 0
+            if should_save:
+                context.storage_state(path=str(state_path))
+                storage_state_saved = True
+                emit_status(f"[세션 {session_id}] 브라우저 세션을 저장했습니다: {state_path}")
+
+    def finish_worker_without_context() -> None:
+        nonlocal active_workers
+        with storage_state_lock:
+            active_workers -= 1
+
+    def run_worker(session_id: int) -> None:
+        with sync_playwright() as playwright:
+            try:
+                browser = launch_browser(playwright, headless, lambda message: emit_status(f"[세션 {session_id}] {message}"))
+            except RuntimeError as exc:
+                finish_worker_without_context()
+                with file_lock:
+                    error_path = write_startup_error(log_dir, f"[세션 {session_id}] {exc}")
+                emit_status(f"[세션 {session_id}] 브라우저 시작 오류를 기록했습니다: {error_path}")
+                raise
+
+            context_kwargs: dict[str, Any] = {"accept_downloads": True}
+            if use_storage_state and state_path.exists():
+                context_kwargs["storage_state"] = str(state_path)
+
+            context = browser.new_context(**context_kwargs)
+            page = context.new_page()
+            page.set_default_navigation_timeout(PAGE_LOAD_TIMEOUT_MS)
+            page.set_default_timeout(ELEMENT_TIMEOUT_MS)
+            diagnostic_events = setup_page_diagnostics(page)
+
+            try:
+                emit_status(f"[세션 {session_id}] KOTRA 보고서 생성 페이지에 접속합니다.")
+                open_site(page)
+                ensure_initial_form(page, lambda message: emit_status(f"[세션 {session_id}] {message}"))
+
+                while True:
+                    if combined_force_stop_requested():
+                        emit_status(f"[세션 {session_id}] 강제종료 요청으로 작업을 즉시 중단합니다.")
+                        break
+                    if should_stop_before_next_row():
+                        emit_status(f"[세션 {session_id}] 중지 요청이 있어 다음 행으로 넘어가지 않습니다.")
+                        break
+
+                    try:
+                        current_index, row_data = row_queue.get_nowait()
+                    except queue.Empty:
+                        break
+
+                    row_index = int(row_data["row_index"])
+                    row_label = f"{current_index}/{total}"
+                    if retry_failed_only:
+                        row_label = f"{row_label}, 원본 행 {row_index}"
+                    prefix = f"[세션 {session_id}] [{row_label}]"
+
+                    try:
+                        emit_progress(f"{prefix} 입력 및 보고서 생성 중")
+                        emit_status(f"{prefix} 행 처리를 시작합니다.")
+                        clear_diagnostics(diagnostic_events)
+                        with file_lock:
+                            update_processing_status(input_excel_path, log_dir, row_data, STATUS_RUNNING)
+
+                        save_path = build_download_path(download_dir, row_data)
+                        saved_file = process_row(
+                            page,
+                            row_data,
+                            save_path,
+                            log_dir,
+                            diagnostic_events,
+                            timeout_ms,
+                            retry_count,
+                            status_callback=lambda message, item_session_id=session_id, item_row_label=row_label, item_prefix=prefix: emit_row_progress(
+                                item_session_id,
+                                item_row_label,
+                                item_prefix,
+                                message,
+                            ),
+                            force_stop_requested=force_stop_requested,
+                        )
+                        with file_lock:
+                            log_success_row(row_data, saved_file, log_dir)
+                            update_processing_status(input_excel_path, log_dir, row_data, STATUS_SUCCESS, saved_file=saved_file)
+                        mark_result(True)
+                        clear_wait_status(session_id)
+                        emit_status(f"{prefix} 성공: {saved_file.name}")
+
+                    except PlaywrightTimeoutError as exc:
+                        clear_wait_status(session_id)
+                        message = f"제한 시간 안에 필요한 요소를 찾지 못했습니다: {exc}"
+                        artifacts = save_failure_artifacts(page, row_data, log_dir, message, diagnostic_events)
+                        error_message = f"{message} / diagnostics: {artifacts}"
+                        with file_lock:
+                            log_failed_row(row_data, error_message, log_dir)
+                            update_processing_status(input_excel_path, log_dir, row_data, STATUS_FAILED, error_message=error_message)
+                        mark_result(False)
+                        emit_status(f"{prefix} 실패: {message}")
+
+                    except AutomationAborted:
+                        emit_status(f"[세션 {session_id}] 강제종료 요청으로 작업을 즉시 중단합니다.")
+                        break
+
+                    except GenerationError as exc:
+                        clear_wait_status(session_id)
+                        error_message = f"{exc} / diagnostics: {exc.artifacts}"
+                        with file_lock:
+                            log_failed_row(row_data, error_message, log_dir)
+                            update_processing_status(input_excel_path, log_dir, row_data, STATUS_FAILED, error_message=error_message)
+                        mark_result(False)
+                        emit_status(f"{prefix} 실패: {exc}")
+
+                    except Exception as exc:
+                        clear_wait_status(session_id)
+                        artifacts = save_failure_artifacts(page, row_data, log_dir, str(exc), diagnostic_events)
+                        error_message = f"{exc} / diagnostics: {artifacts}"
+                        with file_lock:
+                            log_failed_row(row_data, error_message, log_dir)
+                            update_processing_status(input_excel_path, log_dir, row_data, STATUS_FAILED, error_message=error_message)
+                        mark_result(False)
+                        emit_status(f"{prefix} 실패: {exc}")
+
+                    finally:
+                        row_queue.task_done()
+                        emit_progress(f"{prefix} 다음 행 준비 중")
+                        if not should_stop_before_next_row() and not row_queue.empty():
+                            try:
+                                reset_for_next_row(page)
+                            except Exception as exc:
+                                emit_status(f"[세션 {session_id}] 다음 행 준비 중 페이지 초기화 실패, 새로 접속합니다: {exc}")
+                                open_site(page)
+                                ensure_initial_form(page, lambda message: emit_status(f"[세션 {session_id}] {message}"))
+
+            finally:
+                try:
+                    finish_worker(context, session_id)
+                finally:
+                    context.close()
+                    browser.close()
+
+    worker_errors: list[str] = []
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        futures = [executor.submit(run_worker, session_id) for session_id in range(1, worker_count + 1)]
+        for future in as_completed(futures):
+            try:
+                future.result()
+            except Exception as exc:
+                worker_errors.append(str(exc))
+                emit_status(f"병렬 세션 오류: {exc}")
+
+    emit_progress("완료")
+    with counter_lock:
+        result = {"total": total, "success": success_count, "failed": failed_count}
+
+    if worker_errors and result["success"] + result["failed"] == 0:
+        raise RuntimeError("모든 병렬 세션이 시작 또는 처리 중 실패했습니다: " + " / ".join(worker_errors))
+
+    return result
+
+
 def run_automation(
     input_excel_path: str | Path,
     download_dir: str | Path = DEFAULT_DOWNLOAD_DIR,
@@ -701,6 +1015,7 @@ def run_automation(
     progress_callback: ProgressCallback | None = None,
     stop_requested: StopFlag | None = None,
     force_stop_requested: StopFlag | None = None,
+    parallel_sessions: int = 1,
 ) -> dict[str, int]:
     input_excel_path = Path(input_excel_path)
     download_dir = Path(download_dir)
@@ -746,6 +1061,28 @@ def run_automation(
         emit_status("처리할 입력 행이 없습니다.")
         emit_progress(0, "완료")
         return {"total": 0, "success": 0, "failed": 0}
+
+    parallel_sessions = normalize_parallel_sessions(parallel_sessions)
+    if parallel_sessions > 1:
+        return run_parallel_automation(
+            input_excel_path,
+            download_dir,
+            headless,
+            log_dir=log_dir,
+            state_path=state_path,
+            rows=rows,
+            timeout_ms=timeout_ms,
+            retry_count=retry_count,
+            use_storage_state=use_storage_state,
+            save_storage_state=save_storage_state,
+            retry_failed_only=retry_failed_only,
+            wait_for_manual_login=wait_for_manual_login,
+            parallel_sessions=parallel_sessions,
+            status_callback=status_callback,
+            progress_callback=progress_callback,
+            stop_requested=stop_requested,
+            force_stop_requested=force_stop_requested,
+        )
 
     with sync_playwright() as playwright:
         try:

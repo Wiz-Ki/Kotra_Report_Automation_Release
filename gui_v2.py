@@ -13,7 +13,15 @@ from tkinter import filedialog, messagebox
 import customtkinter as ctk
 
 from automation import run_automation
-from config import APP_CREDITS, BASE_DIR, DEFAULT_DOWNLOAD_DIR, DEFAULT_LOG_DIR, DEFAULT_STATE_PATH
+from config import (
+    APP_CREDITS,
+    BASE_DIR,
+    DEFAULT_DOWNLOAD_DIR,
+    DEFAULT_LOG_DIR,
+    DEFAULT_PARALLEL_SESSIONS,
+    DEFAULT_STATE_PATH,
+    MAX_PARALLEL_SESSIONS,
+)
 from template import create_input_template
 
 
@@ -57,6 +65,7 @@ class KotraReportAppV2(ctk.CTk):
         self.run_mode = tk.StringVar(value="전체 실행")
         self.background = tk.BooleanVar(value=False)
         self.use_session = tk.BooleanVar(value=False)
+        self.parallel_sessions = tk.StringVar(value=str(DEFAULT_PARALLEL_SESSIONS))
         self.status = tk.StringVar(value="대기 중")
         self.progress = tk.StringVar(value="0 / 0")
         self.progress_percent = tk.DoubleVar(value=0)
@@ -71,10 +80,14 @@ class KotraReportAppV2(ctk.CTk):
         self.status_badge: ctk.CTkLabel | None = None
         self.progress_bar: ctk.CTkProgressBar | None = None
         self.log_text: ctk.CTkTextbox | None = None
+        self.parallel_options_frame: ctk.CTkFrame | None = None
+        self.parallel_sessions_menu: ctk.CTkOptionMenu | None = None
         self.mode_buttons: dict[str, ctk.CTkButton] = {}
 
         self.stop_requested = False
         self.force_stop_requested = False
+        self.parallel_options_enabled = False
+        self.creator_click_count = 0
         self.worker: threading.Thread | None = None
         self.events: queue.Queue[tuple[str, object]] = queue.Queue()
 
@@ -235,6 +248,8 @@ class KotraReportAppV2(ctk.CTk):
             font=ctk.CTkFont(size=14),
         ).grid(row=1, column=0, sticky="w", padx=16, pady=(0, 14))
 
+        self._build_parallel_options(panel)
+
         hint = ctk.CTkLabel(
             panel,
             text="실패 행 재시도는 logs/failed_rows.xlsx 기준입니다. 세션 저장은 로그인이나 쿠키 유지가 필요할 때만 사용하세요.",
@@ -242,7 +257,51 @@ class KotraReportAppV2(ctk.CTk):
             text_color=COLORS["muted"],
             anchor="w",
         )
-        hint.grid(row=1, column=0, columnspan=2, sticky="ew", padx=18, pady=(8, 18))
+        hint.grid(row=2, column=0, columnspan=2, sticky="ew", padx=18, pady=(8, 18))
+
+    def _build_parallel_options(self, parent: ctk.CTkFrame) -> None:
+        frame = ctk.CTkFrame(
+            parent,
+            fg_color=COLORS["surface_alt"],
+            border_width=1,
+            border_color="#dbeafe",
+            corner_radius=8,
+        )
+        frame.grid(row=1, column=0, columnspan=2, sticky="ew", padx=18, pady=(8, 4))
+        frame.grid_columnconfigure(1, weight=1)
+
+        ctk.CTkLabel(
+            frame,
+            text="병렬 세션 수",
+            text_color=COLORS["text"],
+            font=ctk.CTkFont(size=14, weight="bold"),
+            anchor="w",
+        ).grid(row=0, column=0, sticky="w", padx=16, pady=14)
+
+        self.parallel_sessions_menu = ctk.CTkOptionMenu(
+            frame,
+            variable=self.parallel_sessions,
+            values=[str(value) for value in range(1, MAX_PARALLEL_SESSIONS + 1)],
+            width=96,
+            height=34,
+            fg_color=COLORS["surface"],
+            button_color=COLORS["primary"],
+            button_hover_color=COLORS["primary_hover"],
+            text_color=COLORS["text"],
+            dropdown_fg_color=COLORS["surface"],
+        )
+        self.parallel_sessions_menu.grid(row=0, column=1, sticky="e", padx=(12, 6), pady=14)
+
+        ctk.CTkLabel(
+            frame,
+            text="개발자 옵션",
+            text_color=COLORS["primary"],
+            font=ctk.CTkFont(size=13, weight="bold"),
+            anchor="e",
+        ).grid(row=0, column=2, sticky="e", padx=(6, 16), pady=14)
+
+        self.parallel_options_frame = frame
+        frame.grid_remove()
 
     def _build_action_panel(self, parent: ctk.CTkFrame) -> None:
         panel = ctk.CTkFrame(parent, fg_color="transparent")
@@ -551,7 +610,7 @@ class KotraReportAppV2(ctk.CTk):
                 text_color=COLORS["muted"],
                 anchor="w",
             ).grid(row=index, column=0, sticky="w", pady=3)
-            ctk.CTkLabel(
+            value_label = ctk.CTkLabel(
                 info,
                 text=value,
                 font=ctk.CTkFont(size=13),
@@ -559,7 +618,10 @@ class KotraReportAppV2(ctk.CTk):
                 wraplength=360,
                 justify="left",
                 anchor="w",
-            ).grid(row=index, column=1, sticky="ew", pady=3)
+            )
+            value_label.grid(row=index, column=1, sticky="ew", pady=3)
+            if label == "제작":
+                value_label.bind("<Button-1>", lambda _event: self._handle_parallel_easter_egg())
 
         divider = ctk.CTkFrame(body, height=1, fg_color=COLORS["border"])
         divider.grid(row=4, column=0, sticky="ew", padx=22, pady=(0, 14))
@@ -597,6 +659,36 @@ class KotraReportAppV2(ctk.CTk):
         dialog.geometry(f"+{max(x, 0)}+{max(y, 0)}")
         dialog.grab_set()
         dialog.lift()
+
+    def _handle_parallel_easter_egg(self) -> None:
+        if self.parallel_options_enabled:
+            return
+
+        self.creator_click_count += 1
+        if self.creator_click_count < 5:
+            return
+
+        self.parallel_options_enabled = True
+        self._show_parallel_options()
+        self.status.set("병렬 처리 옵션 활성화됨")
+        self._set_status_badge("warning")
+        self._append_log("개발자 옵션: 병렬 처리 설정이 활성화되었습니다.", "warning")
+        messagebox.showinfo("개발자 옵션", "병렬 처리 옵션이 활성화되었습니다.")
+
+    def _show_parallel_options(self) -> None:
+        if self.parallel_options_frame is not None:
+            self.parallel_options_frame.grid()
+
+    def _selected_parallel_sessions(self) -> int:
+        if not self.parallel_options_enabled:
+            return 1
+
+        try:
+            value = int(self.parallel_sessions.get())
+        except ValueError:
+            return DEFAULT_PARALLEL_SESSIONS
+
+        return max(1, min(MAX_PARALLEL_SESSIONS, value))
 
     def _start(self) -> None:
         if self.worker and self.worker.is_alive():
@@ -664,6 +756,8 @@ class KotraReportAppV2(ctk.CTk):
                     border_color=COLORS["border"],
                     text_color="#94a3b8",
                 )
+        if self.parallel_sessions_menu is not None:
+            self.parallel_sessions_menu.configure(state="disabled" if running else "normal")
 
     def _set_status_badge(self, state: str) -> None:
         if self.status_badge is None:
@@ -711,6 +805,7 @@ class KotraReportAppV2(ctk.CTk):
                 save_storage_state=self.use_session.get(),
                 retry_failed_only=self._retry_failed_only(),
                 wait_for_manual_login=False,
+                parallel_sessions=self._selected_parallel_sessions(),
                 status_callback=lambda message: self.events.put(("status", message)),
                 progress_callback=lambda data: self.events.put(("progress", data)),
                 stop_requested=lambda: self.stop_requested,

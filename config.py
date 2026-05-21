@@ -22,6 +22,8 @@ TIMEOUT_MS = TIMEOUT_MINUTES * 60 * 1000
 PAGE_LOAD_TIMEOUT_MS = 120 * 1000
 ELEMENT_TIMEOUT_MS = 60 * 1000
 GENERATION_RETRY_COUNT = 2
+DEFAULT_PARALLEL_SESSIONS = 3
+MAX_PARALLEL_SESSIONS = 5
 
 # 개발 초기 기본값은 브라우저를 표시하는 모드입니다.
 DEFAULT_HEADLESS = False
@@ -37,6 +39,8 @@ DEFAULT_CONFIG = {
     "retry_count": GENERATION_RETRY_COUNT,
     "use_storage_state": False,
     "save_storage_state": False,
+    "default_parallel_sessions": DEFAULT_PARALLEL_SESSIONS,
+    "max_parallel_sessions": MAX_PARALLEL_SESSIONS,
 }
 
 
