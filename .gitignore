@@ -4,6 +4,9 @@ __pycache__/
 
 # VM setup/runtime artifacts
 portable_python/
+portable_python_venv/
+portable_python_broken*/
+.runtime_python.bat
 .setup_downloads/
 downloads/
 logs/

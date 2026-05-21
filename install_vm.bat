@@ -4,12 +4,21 @@ setlocal EnableExtensions
 cd /d "%~dp0"
 
 set "ROOT=%CD%"
+set "RUNTIME_FILE=%ROOT%\.runtime_python.bat"
 set "PYTHON_EXE=%ROOT%\portable_python\python.exe"
 
 echo [1/4] Preparing portable Python runtime on this VM...
 call "%ROOT%\scripts\prepare_portable_python.bat"
 if errorlevel 1 (
     echo VM runtime setup failed.
+    pause
+    exit /b 1
+)
+if exist "%RUNTIME_FILE%" call "%RUNTIME_FILE%"
+if not defined PYTHON_EXE set "PYTHON_EXE=%ROOT%\portable_python\python.exe"
+if not exist "%PYTHON_EXE%" (
+    echo Python runtime was not found.
+    echo Run install_vm.bat again and check the setup output.
     pause
     exit /b 1
 )
