@@ -95,7 +95,16 @@ SOURCE_COLUMN_ALIASES = {
         "수출단계",
         "분류",
     ],
-    "target_country": ["target_country", "희망진출국가", "희망 진출 국가", "진출국가"],
+    "target_country": [
+        "target_country",
+        "희망진출국가",
+        "희망 진출 국가",
+        "진출국가",
+        "국가명",
+        "국가",
+        "수출국",
+        "수출국가",
+    ],
 }
 
 
