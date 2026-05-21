@@ -4,14 +4,18 @@ setlocal EnableExtensions
 cd /d "%~dp0\.."
 
 if not defined PYTHON_VERSION set "PYTHON_VERSION=3.13.5"
+if not defined FALLBACK_PYTHON_VERSION set "FALLBACK_PYTHON_VERSION=3.12.10"
 if not defined PYTHON_INSTALLER_URL set "PYTHON_INSTALLER_URL=https://www.python.org/ftp/python/%PYTHON_VERSION%/python-%PYTHON_VERSION%-amd64.exe"
+if not defined FALLBACK_PYTHON_INSTALLER_URL set "FALLBACK_PYTHON_INSTALLER_URL=https://www.python.org/ftp/python/%FALLBACK_PYTHON_VERSION%/python-%FALLBACK_PYTHON_VERSION%-amd64.exe"
 
 set "ROOT=%CD%"
 set "PYTHON_DIR=%ROOT%\portable_python"
 set "VENV_DIR=%ROOT%\portable_python_venv"
 set "DOWNLOAD_DIR=%ROOT%\.setup_downloads"
 set "PYTHON_INSTALLER=%DOWNLOAD_DIR%\python-%PYTHON_VERSION%-amd64.exe"
+set "FALLBACK_PYTHON_INSTALLER=%DOWNLOAD_DIR%\python-%FALLBACK_PYTHON_VERSION%-amd64.exe"
 set "PYTHON_INSTALL_LOG=%DOWNLOAD_DIR%\python-install.log"
+set "FALLBACK_PYTHON_INSTALL_LOG=%DOWNLOAD_DIR%\python-%FALLBACK_PYTHON_VERSION%-install.log"
 set "RUNTIME_FILE=%ROOT%\.runtime_python.bat"
 set "RUNTIME_PYTHON_EXE="
 set "RUNTIME_PYTHONW_EXE="
@@ -68,7 +72,11 @@ if not defined PYTHON_READY (
     if errorlevel 1 (
         echo Falling back to an existing Python installation.
         call :create_venv_from_existing_python
-        if errorlevel 1 exit /b 1
+        if errorlevel 1 (
+            echo Existing Python fallback failed. Trying fallback Python %FALLBACK_PYTHON_VERSION%.
+            call :install_fallback_python
+            if errorlevel 1 exit /b 1
+        )
     ) else (
         set "RUNTIME_PYTHON_EXE=%PYTHON_DIR%\python.exe"
         set "RUNTIME_PYTHONW_EXE=%PYTHON_DIR%\pythonw.exe"
@@ -164,6 +172,31 @@ if not exist "%VENV_DIR%\Scripts\python.exe" (
 )
 set "RUNTIME_PYTHON_EXE=%VENV_DIR%\Scripts\python.exe"
 set "RUNTIME_PYTHONW_EXE=%VENV_DIR%\Scripts\pythonw.exe"
+exit /b 0
+
+:install_fallback_python
+if exist "%PYTHON_DIR%" (
+    call :backup_existing_python
+    if errorlevel 1 exit /b 1
+)
+echo Downloading fallback Python %FALLBACK_PYTHON_VERSION%...
+if not exist "%FALLBACK_PYTHON_INSTALLER%" (
+    powershell -NoProfile -ExecutionPolicy Bypass -Command "Invoke-WebRequest -Uri '%FALLBACK_PYTHON_INSTALLER_URL%' -OutFile '%FALLBACK_PYTHON_INSTALLER%'"
+    if errorlevel 1 exit /b 1
+) else (
+    echo Using cached %FALLBACK_PYTHON_INSTALLER%
+)
+echo Installing fallback Python %FALLBACK_PYTHON_VERSION% into portable_python...
+"%FALLBACK_PYTHON_INSTALLER%" /quiet InstallAllUsers=0 TargetDir="%PYTHON_DIR%" DefaultJustForMeTargetDir="%PYTHON_DIR%" Include_launcher=0 Shortcuts=0 PrependPath=0 Include_test=0 Include_doc=0 Include_pip=1 Include_tcltk=1 Include_symbols=0 Include_debug=0 /log "%FALLBACK_PYTHON_INSTALL_LOG%"
+if errorlevel 1 exit /b 1
+call :wait_for_python_exe
+if errorlevel 1 (
+    echo Fallback Python installer log:
+    echo %FALLBACK_PYTHON_INSTALL_LOG%
+    exit /b 1
+)
+set "RUNTIME_PYTHON_EXE=%PYTHON_DIR%\python.exe"
+set "RUNTIME_PYTHONW_EXE=%PYTHON_DIR%\pythonw.exe"
 exit /b 0
 
 :write_runtime_file
