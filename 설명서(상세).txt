@@ -1,0 +1,146 @@
+KOTRA 수출시장 분석보고서 자동생성기 - Windows VM 실행 안내
+
+이 폴더는 Windows 원격 VM에서 ZIP으로 다운로드해 실행하기 위한 무EXE 배포본입니다.
+PyInstaller exe를 만들거나 배포하지 않습니다.
+
+
+1. 준비 조건
+
+- Windows 원격 VM에서 실행합니다.
+- VM은 인터넷 접속이 가능해야 합니다.
+- VM에 Microsoft Edge가 설치되어 있어야 합니다.
+- .bat 파일 실행이 허용되어야 합니다.
+
+
+2. GitHub에서 ZIP 다운로드
+
+1) Windows VM에서 GitHub 배포 저장소 화면을 엽니다.
+2) Code 버튼을 누릅니다.
+3) Download ZIP을 선택합니다.
+4) 다운로드된 ZIP 파일을 원하는 위치에 압축 해제합니다.
+5) 압축 해제된 폴더 안으로 들어갑니다.
+
+주의:
+- ZIP 파일 안에서 바로 실행하지 말고 반드시 압축을 푼 뒤 실행하세요.
+- 폴더 경로에 특수문자가 너무 많거나 너무 긴 경로는 피하는 것이 좋습니다.
+
+
+3. 최초 1회 설치/준비
+
+압축 해제된 폴더 안에서 아래 파일을 더블클릭합니다.
+
+   install_vm.bat
+
+install_vm.bat가 수행하는 작업:
+
+- 공식 Python Windows 설치파일을 다운로드합니다.
+- 현재 폴더 안에 portable_python 폴더를 만듭니다.
+- portable_python 안에 Python을 설치합니다.
+- requirements-runtime.txt 기준으로 필요한 Python 패키지를 설치합니다.
+- Microsoft Edge 설치 여부를 확인합니다.
+- 프로그램 import 가능 여부를 확인합니다.
+
+설치가 끝나면 "VM setup passed." 메시지가 표시됩니다.
+
+
+4. 프로그램 실행
+
+설치가 끝난 뒤 평소에는 아래 파일만 실행합니다.
+
+   run_gui.bat
+
+GUI 창이 열리면:
+
+1) 입력 엑셀 파일을 선택합니다.
+2) 다운로드 저장 폴더를 확인합니다.
+3) 처음에는 샘플 1행만 넣은 엑셀로 테스트합니다.
+4) 정상 동작하면 전체 데이터를 실행합니다.
+
+
+5. 입력 엑셀
+
+기본 템플릿 파일:
+
+   input_template.xlsx
+
+실제 실행용 엑셀은 input_template.xlsx를 복사해서 작성하거나,
+GUI에서 원하는 .xlsx 파일을 직접 선택하면 됩니다.
+
+필수 입력값:
+
+- 수출액 규모
+- 해당 품목 수출 경험
+- HS CODE
+- 희망진출국가
+
+
+6. 결과와 로그 위치
+
+기본 PDF 저장 폴더:
+
+   downloads
+
+기본 로그 폴더:
+
+   logs
+
+주요 로그 파일:
+
+- logs\success_log.xlsx
+- logs\failed_rows.xlsx
+- logs\processing_status.xlsx
+- logs\startup_error.txt
+- logs\diagnostics
+
+
+7. 실패 행 재시도
+
+GUI에서 "실패 행만 재시도"를 선택하면 logs\failed_rows.xlsx 기준으로 실패한 행만 다시 실행합니다.
+
+명령줄로 실행하려면:
+
+   run_cli.bat --retry-failed
+
+
+8. 자주 발생하는 문제
+
+[install_vm.bat에서 Python 다운로드 실패]
+
+- VM 인터넷 연결을 확인합니다.
+- python.org 접속이 보안 정책으로 막혀 있는지 확인합니다.
+
+[pip 설치 실패]
+
+- VM에서 pypi.org 접속이 가능한지 확인합니다.
+- 사내 프록시가 필요한 환경인지 확인합니다.
+
+[Microsoft Edge를 찾지 못함]
+
+- VM에 Microsoft Edge가 설치되어 있는지 확인합니다.
+- Edge 실행이 보안 정책으로 차단되어 있는지 확인합니다.
+
+[Edge는 열리지만 자동화가 실패함]
+
+- 사내 Edge 정책이 자동화 실행, 새 브라우저 프로필 생성, 다운로드를 막는지 확인합니다.
+- logs\startup_error.txt 또는 logs\diagnostics 폴더를 확인합니다.
+
+[GUI가 열리지 않음]
+
+- install_vm.bat를 먼저 실행했는지 확인합니다.
+- portable_python 폴더가 생성되었는지 확인합니다.
+- run_cli.bat --create-template 명령으로 Python 실행이 되는지 확인합니다.
+
+
+9. 사용 순서 요약
+
+처음 한 번:
+
+   install_vm.bat
+
+매번 실행:
+
+   run_gui.bat
+
+문제 확인 또는 콘솔 실행:
+
+   run_cli.bat
