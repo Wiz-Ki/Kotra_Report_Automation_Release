@@ -82,12 +82,16 @@ class KotraReportAppV2(ctk.CTk):
         self.status_badge: ctk.CTkLabel | None = None
         self.progress_bar: ctk.CTkProgressBar | None = None
         self.log_text: ctk.CTkTextbox | None = None
+        self.background_switch: ctk.CTkSwitch | None = None
+        self.use_session_switch: ctk.CTkSwitch | None = None
+        self.auto_retry_switch: ctk.CTkSwitch | None = None
         self.parallel_options_frame: ctk.CTkFrame | None = None
         self.parallel_sessions_menu: ctk.CTkOptionMenu | None = None
         self.mode_buttons: dict[str, ctk.CTkButton] = {}
 
         self.stop_requested = False
         self.force_stop_requested = False
+        self.auto_retry_runtime_enabled = True
         self.parallel_options_enabled = False
         self.creator_click_count = 0
         self.worker: threading.Thread | None = None
@@ -227,7 +231,7 @@ class KotraReportAppV2(ctk.CTk):
         )
         switch_box.grid(row=0, column=1, sticky="nsew", padx=18, pady=(18, 8))
         switch_box.grid_columnconfigure(0, weight=1)
-        ctk.CTkSwitch(
+        self.background_switch = ctk.CTkSwitch(
             switch_box,
             text="백그라운드 실행",
             variable=self.background,
@@ -237,8 +241,9 @@ class KotraReportAppV2(ctk.CTk):
             button_hover_color="#f8fafc",
             text_color=COLORS["text"],
             font=ctk.CTkFont(size=14),
-        ).grid(row=0, column=0, sticky="w", padx=16, pady=(14, 10))
-        ctk.CTkSwitch(
+        )
+        self.background_switch.grid(row=0, column=0, sticky="w", padx=16, pady=(14, 10))
+        self.use_session_switch = ctk.CTkSwitch(
             switch_box,
             text="브라우저 세션 저장 사용",
             variable=self.use_session,
@@ -248,24 +253,27 @@ class KotraReportAppV2(ctk.CTk):
             button_hover_color="#f8fafc",
             text_color=COLORS["text"],
             font=ctk.CTkFont(size=14),
-        ).grid(row=1, column=0, sticky="w", padx=16, pady=(0, 10))
-        ctk.CTkSwitch(
+        )
+        self.use_session_switch.grid(row=1, column=0, sticky="w", padx=16, pady=(0, 10))
+        self.auto_retry_switch = ctk.CTkSwitch(
             switch_box,
             text="실패 항목 자동 재시도(1회)",
             variable=self.auto_retry,
+            command=self._on_auto_retry_changed,
             fg_color="#cbd5e1",
             progress_color=COLORS["primary"],
             button_color="#ffffff",
             button_hover_color="#f8fafc",
             text_color=COLORS["text"],
             font=ctk.CTkFont(size=14),
-        ).grid(row=2, column=0, sticky="w", padx=16, pady=(0, 14))
+        )
+        self.auto_retry_switch.grid(row=2, column=0, sticky="w", padx=16, pady=(0, 14))
 
         self._build_parallel_options(panel)
 
         hint = ctk.CTkLabel(
             panel,
-            text="처리 중 실패한 항목은 재시도 대기열에 올려 기본 1회 다시 시도합니다. 실패 행 재시도는 logs/failed_rows.xlsx 기준입니다.",
+            text="자동 재시도는 실행 중 변경할 수 있으며 이후 새 실패부터 반영됩니다. 실패 행 재시도는 logs/failed_rows.xlsx 기준입니다.",
             font=ctk.CTkFont(size=13),
             text_color=COLORS["muted"],
             anchor="w",
@@ -761,6 +769,7 @@ class KotraReportAppV2(ctk.CTk):
         self._set_progress(0)
         self._clear_log()
         self._append_log("작업을 시작합니다.", "info")
+        self._sync_auto_retry_runtime(log_change=False)
         self._set_running_state(True)
         self.worker = threading.Thread(target=self._run_worker, daemon=True)
         self.worker.start()
@@ -806,6 +815,22 @@ class KotraReportAppV2(ctk.CTk):
                 )
         if self.parallel_sessions_menu is not None:
             self.parallel_sessions_menu.configure(state="disabled" if running else "normal")
+        for option_switch in (self.background_switch, self.use_session_switch):
+            if option_switch is not None:
+                option_switch.configure(state="disabled" if running else "normal")
+
+    def _on_auto_retry_changed(self) -> None:
+        self._sync_auto_retry_runtime(log_change=bool(self.worker and self.worker.is_alive()))
+
+    def _sync_auto_retry_runtime(self, log_change: bool = True) -> None:
+        enabled = bool(self.auto_retry.get())
+        self.auto_retry_runtime_enabled = enabled
+        if log_change:
+            state = "켜짐" if enabled else "꺼짐"
+            self._append_log(f"자동 재시도 설정 변경: {state}", "warning")
+
+    def _auto_retry_enabled(self) -> bool:
+        return self.auto_retry_runtime_enabled
 
     def _set_status_badge(self, state: str) -> None:
         if self.status_badge is None:
@@ -854,7 +879,8 @@ class KotraReportAppV2(ctk.CTk):
                 retry_failed_only=self._retry_failed_only(),
                 wait_for_manual_login=False,
                 parallel_sessions=self._selected_parallel_sessions(),
-                row_retry_count=DEFAULT_ROW_RETRY_COUNT if self.auto_retry.get() else 0,
+                row_retry_count=DEFAULT_ROW_RETRY_COUNT,
+                auto_retry_enabled=self._auto_retry_enabled,
                 status_callback=lambda message: self.events.put(("status", message)),
                 progress_callback=lambda data: self.events.put(("progress", data)),
                 stop_requested=lambda: self.stop_requested,

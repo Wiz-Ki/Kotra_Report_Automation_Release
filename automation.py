@@ -56,6 +56,7 @@ SELECTORS = _load_app_selectors()
 StatusCallback = Callable[[str], None]
 ProgressCallback = Callable[[dict[str, Any]], None]
 StopFlag = Callable[[], bool]
+RetryFlag = Callable[[], bool]
 
 PROCESSING_STATUS_FILENAME = "processing_status.xlsx"
 SOURCE_FILE_COLUMN = "원본파일"
@@ -778,6 +779,15 @@ def retry_suffix(attempt: int, final: bool = False) -> str:
     return f"{label}_attempt_{attempt + 1}"
 
 
+def is_retry_enabled(auto_retry_enabled: RetryFlag | None) -> bool:
+    if auto_retry_enabled is None:
+        return True
+    try:
+        return bool(auto_retry_enabled())
+    except Exception:
+        return True
+
+
 def prepare_parallel_storage_state(
     state_path: Path,
     headless: bool,
@@ -824,6 +834,7 @@ def run_parallel_automation(
     wait_for_manual_login: bool,
     parallel_sessions: int,
     row_retry_count: int,
+    auto_retry_enabled: RetryFlag | None,
     status_callback: StatusCallback | None,
     progress_callback: ProgressCallback | None,
     stop_requested: StopFlag | None,
@@ -1026,7 +1037,11 @@ def run_parallel_automation(
 
                     except Exception as exc:
                         clear_wait_status(session_id)
-                        can_retry = row_attempt < row_retry_count and not should_stop_before_next_row()
+                        can_retry = (
+                            row_attempt < row_retry_count
+                            and is_retry_enabled(auto_retry_enabled)
+                            and not should_stop_before_next_row()
+                        )
                         message, error_message = build_failure_error_message(
                             page,
                             row_data,
@@ -1112,6 +1127,7 @@ def run_automation(
     force_stop_requested: StopFlag | None = None,
     parallel_sessions: int = 1,
     row_retry_count: int = DEFAULT_ROW_RETRY_COUNT,
+    auto_retry_enabled: RetryFlag | None = None,
 ) -> dict[str, int]:
     input_excel_path = Path(input_excel_path)
     download_dir = Path(download_dir)
@@ -1177,6 +1193,7 @@ def run_automation(
             wait_for_manual_login=wait_for_manual_login,
             parallel_sessions=parallel_sessions,
             row_retry_count=row_retry_count,
+            auto_retry_enabled=auto_retry_enabled,
             status_callback=status_callback,
             progress_callback=progress_callback,
             stop_requested=stop_requested,
@@ -1269,6 +1286,7 @@ def run_automation(
                 except Exception as exc:
                     can_retry = (
                         row_attempt < row_retry_count
+                        and is_retry_enabled(auto_retry_enabled)
                         and not (stop_requested and stop_requested())
                         and not (force_stop_requested and force_stop_requested())
                     )
