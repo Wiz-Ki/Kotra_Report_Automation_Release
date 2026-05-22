@@ -4,6 +4,7 @@ import queue
 import re
 import importlib.util
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from decimal import Decimal, InvalidOperation
 from datetime import datetime
@@ -84,6 +85,9 @@ STATUS_RETRY_PENDING = "자동 재시도 대기"
 STATUS_SUCCESS = "처리완료"
 STATUS_FAILED = "처리실패"
 PARALLEL_WAIT_SUMMARY_INTERVAL_SECONDS = 30
+PARALLEL_SESSION_START_DELAY_SECONDS = 3
+DEFAULT_INITIAL_FORM_WAIT_SECONDS = 10
+PARALLEL_INITIAL_FORM_WAIT_SECONDS = 15
 
 
 class GenerationError(RuntimeError):
@@ -619,7 +623,11 @@ def reset_for_next_row(page: Page) -> None:
         page.locator(SELECTORS["hs_code_input"]).first.wait_for(state="visible", timeout=ELEMENT_TIMEOUT_MS)
 
 
-def ensure_initial_form(page: Page, status_callback: StatusCallback | None = None) -> None:
+def ensure_initial_form(
+    page: Page,
+    status_callback: StatusCallback | None = None,
+    wait_seconds: int = DEFAULT_INITIAL_FORM_WAIT_SECONDS,
+) -> None:
     """
     저장된 브라우저 세션이 결과 화면을 복원해도 다음 자동화가 입력 화면에서 시작되도록 보장한다.
     """
@@ -627,7 +635,7 @@ def ensure_initial_form(page: Page, status_callback: StatusCallback | None = Non
     new_analysis_button = page.locator(SELECTORS["new_analysis_button"]).first
     reset_button = page.locator(SELECTORS["reset_button"]).first
 
-    deadline = datetime.now().timestamp() + 10
+    deadline = datetime.now().timestamp() + wait_seconds
     while datetime.now().timestamp() < deadline:
         if is_visible(hs_code_input):
             return
@@ -660,6 +668,14 @@ def retry_generation(page: Page) -> None:
     retry_button.scroll_into_view_if_needed()
     wait_until_enabled(page, retry_button, ELEMENT_TIMEOUT_MS)
     retry_button.click()
+
+
+def page_wait_seconds(seconds: int, force_stop_requested: StopFlag | None = None) -> None:
+    deadline = datetime.now().timestamp() + seconds
+    while datetime.now().timestamp() < deadline:
+        check_force_stop(force_stop_requested)
+        remaining = deadline - datetime.now().timestamp()
+        time.sleep(max(0.1, min(0.5, remaining)))
 
 
 def process_row(
@@ -919,6 +935,11 @@ def run_parallel_automation(
 
     def run_worker(session_id: int) -> None:
         with sync_playwright() as playwright:
+            start_delay = (session_id - 1) * PARALLEL_SESSION_START_DELAY_SECONDS
+            if start_delay:
+                emit_status(f"[세션 {session_id}] 서버 부하 분산을 위해 {start_delay}초 후 시작합니다.")
+                page_wait_seconds(start_delay, force_stop_requested)
+
             try:
                 browser = launch_browser(playwright, headless, lambda message: emit_status(f"[세션 {session_id}] {message}"))
             except RuntimeError as exc:
@@ -941,7 +962,11 @@ def run_parallel_automation(
             try:
                 emit_status(f"[세션 {session_id}] KOTRA 보고서 생성 페이지에 접속합니다.")
                 open_site(page)
-                ensure_initial_form(page, lambda message: emit_status(f"[세션 {session_id}] {message}"))
+                ensure_initial_form(
+                    page,
+                    lambda message: emit_status(f"[세션 {session_id}] {message}"),
+                    wait_seconds=PARALLEL_INITIAL_FORM_WAIT_SECONDS,
+                )
 
                 while True:
                     if combined_force_stop_requested():
@@ -1035,7 +1060,11 @@ def run_parallel_automation(
                             except Exception as exc:
                                 emit_status(f"[세션 {session_id}] 다음 행 준비 중 페이지 초기화 실패, 새로 접속합니다: {exc}")
                                 open_site(page)
-                                ensure_initial_form(page, lambda message: emit_status(f"[세션 {session_id}] {message}"))
+                                ensure_initial_form(
+                                    page,
+                                    lambda message: emit_status(f"[세션 {session_id}] {message}"),
+                                    wait_seconds=PARALLEL_INITIAL_FORM_WAIT_SECONDS,
+                                )
 
             finally:
                 try:
