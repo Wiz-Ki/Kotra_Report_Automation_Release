@@ -106,12 +106,16 @@ class HoverTooltip:
         self.tooltip = tk.Toplevel(self.widget)
         self.tooltip.withdraw()
         self.tooltip.overrideredirect(True)
-        transparent_color = "#010203"
-        self.tooltip.configure(bg=transparent_color)
-        try:
-            self.tooltip.wm_attributes("-transparentcolor", transparent_color)
-        except tk.TclError:
-            self.tooltip.configure(bg=COLORS["text"])
+        if sys.platform == "darwin":
+            self.tooltip.configure(bg="systemTransparent")
+            self.tooltip.wm_attributes("-transparent", True)
+        else:
+            transparent_color = "#010203"
+            self.tooltip.configure(bg=transparent_color)
+            try:
+                self.tooltip.wm_attributes("-transparentcolor", transparent_color)
+            except tk.TclError:
+                self.tooltip.configure(bg=COLORS["text"])
         measure_font = tkfont.nametofont("TkDefaultFont").copy()
         measure_font.configure(size=10)
         label_font = ctk.CTkFont(size=10)
@@ -125,6 +129,7 @@ class HoverTooltip:
         body = ctk.CTkFrame(
             self.tooltip,
             fg_color=COLORS["text"],
+            bg_color="transparent",
             corner_radius=8,
             border_width=0,
         )
