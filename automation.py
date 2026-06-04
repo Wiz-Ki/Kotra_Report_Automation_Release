@@ -106,17 +106,36 @@ def launch_browser(playwright: Any, headless: bool, status_callback: StatusCallb
         if status_callback:
             status_callback(message)
 
+    headless_shell_exc: PlaywrightError | None = None
+    if headless:
+        try:
+            emit("백그라운드 실행: Playwright Chromium headless shell을 실행합니다.")
+            return playwright.chromium.launch(headless=True)
+        except PlaywrightError as exc:
+            headless_shell_exc = exc
+            emit("Playwright headless shell 실행에 실패해 Microsoft Edge headless로 다시 시도합니다.")
+
+    launch_options: dict[str, Any] = {"headless": headless}
+    if headless:
+        launch_options["args"] = ["--disable-gpu", "--no-startup-window"]
+
     try:
-        emit("Microsoft Edge를 실행합니다.")
-        return playwright.chromium.launch(channel="msedge", headless=headless)
+        mode = "백그라운드" if headless else "화면 표시"
+        emit(f"Microsoft Edge를 {mode} 모드로 실행합니다.")
+        return playwright.chromium.launch(channel="msedge", **launch_options)
     except PlaywrightError as edge_exc:
         emit("Microsoft Edge 실행에 실패해 Playwright 기본 Chromium으로 다시 시도합니다.")
         try:
             return playwright.chromium.launch(headless=headless)
         except PlaywrightError as chromium_exc:
+            headless_shell_message = ""
+            if headless_shell_exc is not None:
+                headless_shell_message = f"- Headless shell 원본 오류: {headless_shell_exc}\n"
             raise RuntimeError(
                 "브라우저를 Playwright로 실행하지 못했습니다.\n"
+                f"{headless_shell_message}"
                 "- Windows VM에서는 Microsoft Edge가 설치되어 있는지 확인해주세요.\n"
+                "- 백그라운드 실행 오류가 계속되면 install_vm.bat를 다시 실행해 Playwright headless shell 설치를 확인해주세요.\n"
                 "- macOS 등 로컬 테스트 환경에서는 Playwright Chromium이 설치되어 있는지 확인해주세요.\n"
                 "- 사내 브라우저 정책이 자동화 실행 또는 새 브라우저 프로필 생성을 차단할 수 있습니다.\n"
                 "- 브라우저가 실행되지만 다운로드가 실패하면 보안/DLP 정책의 다운로드 차단 여부를 확인해주세요.\n"

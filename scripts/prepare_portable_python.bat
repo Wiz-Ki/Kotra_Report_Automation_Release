@@ -21,7 +21,7 @@ set "RUNTIME_PYTHON_EXE="
 set "RUNTIME_PYTHONW_EXE="
 set "PYTHON_READY="
 
-echo [1/6] Checking runtime requirements...
+echo [1/7] Checking runtime requirements...
 if not exist "%ROOT%\requirements-runtime.txt" (
     echo Missing requirements-runtime.txt
     exit /b 1
@@ -29,7 +29,7 @@ if not exist "%ROOT%\requirements-runtime.txt" (
 
 mkdir "%DOWNLOAD_DIR%" 2>nul
 
-echo [2/6] Downloading official Python installer...
+echo [2/7] Downloading official Python installer...
 if not exist "%PYTHON_INSTALLER%" (
     powershell -NoProfile -ExecutionPolicy Bypass -Command "Invoke-WebRequest -Uri '%PYTHON_INSTALLER_URL%' -OutFile '%PYTHON_INSTALLER%'"
     if errorlevel 1 exit /b 1
@@ -37,7 +37,7 @@ if not exist "%PYTHON_INSTALLER%" (
     echo Using cached %PYTHON_INSTALLER%
 )
 
-echo [3/6] Installing Python into portable_python...
+echo [3/7] Installing Python into portable_python...
 if exist "%RUNTIME_FILE%" (
     call "%RUNTIME_FILE%"
     if exist "%PYTHON_EXE%" (
@@ -66,10 +66,18 @@ if not defined PYTHON_READY if exist "%PYTHON_DIR%\python.exe" (
 )
 
 if not defined PYTHON_READY (
-    "%PYTHON_INSTALLER%" /quiet InstallAllUsers=0 TargetDir="%PYTHON_DIR%" DefaultJustForMeTargetDir="%PYTHON_DIR%" Include_launcher=0 Shortcuts=0 PrependPath=0 Include_test=0 Include_doc=0 Include_pip=1 Include_tcltk=1 Include_symbols=0 Include_debug=0 /log "%PYTHON_INSTALL_LOG%"
-    if errorlevel 1 exit /b 1
-    call :wait_for_python_exe
+    call :install_primary_python
     if errorlevel 1 (
+        echo Primary Python installer failed.
+        echo Deleting cached installer and trying one more download...
+        del /f /q "%PYTHON_INSTALLER%" >nul 2>nul
+        powershell -NoProfile -ExecutionPolicy Bypass -Command "Invoke-WebRequest -Uri '%PYTHON_INSTALLER_URL%' -OutFile '%PYTHON_INSTALLER%'"
+        if not errorlevel 1 call :install_primary_python
+    )
+    if errorlevel 1 (
+        echo Primary Python installer failed.
+        echo Installer log:
+        echo %PYTHON_INSTALL_LOG%
         echo Falling back to an existing Python installation.
         call :create_venv_from_existing_python
         if errorlevel 1 (
@@ -77,9 +85,6 @@ if not defined PYTHON_READY (
             call :install_fallback_python
             if errorlevel 1 exit /b 1
         )
-    ) else (
-        set "RUNTIME_PYTHON_EXE=%PYTHON_DIR%\python.exe"
-        set "RUNTIME_PYTHONW_EXE=%PYTHON_DIR%\pythonw.exe"
     )
 )
 
@@ -105,7 +110,7 @@ if exist "%PYTHON_DIR%\python.exe" if not exist "%PYTHON_DIR%\tcl" (
     echo Missing %PYTHON_DIR%\tcl
 )
 
-echo [4/6] Verifying tkinter support...
+echo [4/7] Verifying tkinter support...
 "%RUNTIME_PYTHON_EXE%" -c "import tkinter; print('tkinter OK')"
 if errorlevel 1 (
     echo tkinter is required for the GUI but was not found.
@@ -115,13 +120,20 @@ if errorlevel 1 (
     exit /b 1
 )
 
-echo [5/6] Upgrading pip...
+echo [5/7] Upgrading pip...
 "%RUNTIME_PYTHON_EXE%" -m pip install --upgrade pip
 if errorlevel 1 exit /b 1
 
-echo [6/6] Installing runtime packages from the internet...
+echo [6/7] Installing runtime packages from the internet...
 "%RUNTIME_PYTHON_EXE%" -m pip install -r "%ROOT%\requirements-runtime.txt"
 if errorlevel 1 exit /b 1
+
+echo [7/7] Preparing Playwright Chromium headless shell for background mode...
+"%RUNTIME_PYTHON_EXE%" -m playwright install --only-shell chromium
+if errorlevel 1 (
+    echo Playwright headless shell install failed.
+    echo Background mode will fall back to Microsoft Edge headless.
+)
 
 echo Verifying portable runtime imports...
 "%RUNTIME_PYTHON_EXE%" -c "import pandas, openpyxl, customtkinter, PIL; from playwright.sync_api import sync_playwright; print('portable runtime OK')"
@@ -135,6 +147,15 @@ echo VM runtime is ready.
 echo Use run_gui.bat to start the application.
 
 endlocal
+exit /b 0
+
+:install_primary_python
+    "%PYTHON_INSTALLER%" /quiet InstallAllUsers=0 TargetDir="%PYTHON_DIR%" DefaultJustForMeTargetDir="%PYTHON_DIR%" Include_launcher=0 Shortcuts=0 PrependPath=0 Include_test=0 Include_doc=0 Include_pip=1 Include_tcltk=1 Include_symbols=0 Include_debug=0 /log "%PYTHON_INSTALL_LOG%"
+    if errorlevel 1 exit /b 1
+    call :wait_for_python_exe
+    if errorlevel 1 exit /b 1
+    set "RUNTIME_PYTHON_EXE=%PYTHON_DIR%\python.exe"
+    set "RUNTIME_PYTHONW_EXE=%PYTHON_DIR%\pythonw.exe"
 exit /b 0
 
 :wait_for_python_exe
@@ -188,7 +209,12 @@ if not exist "%FALLBACK_PYTHON_INSTALLER%" (
 )
 echo Installing fallback Python %FALLBACK_PYTHON_VERSION% into portable_python...
 "%FALLBACK_PYTHON_INSTALLER%" /quiet InstallAllUsers=0 TargetDir="%PYTHON_DIR%" DefaultJustForMeTargetDir="%PYTHON_DIR%" Include_launcher=0 Shortcuts=0 PrependPath=0 Include_test=0 Include_doc=0 Include_pip=1 Include_tcltk=1 Include_symbols=0 Include_debug=0 /log "%FALLBACK_PYTHON_INSTALL_LOG%"
-if errorlevel 1 exit /b 1
+if errorlevel 1 (
+    echo Fallback Python installer failed.
+    echo Fallback Python installer log:
+    echo %FALLBACK_PYTHON_INSTALL_LOG%
+    exit /b 1
+)
 call :wait_for_python_exe
 if errorlevel 1 (
     echo Fallback Python installer log:
