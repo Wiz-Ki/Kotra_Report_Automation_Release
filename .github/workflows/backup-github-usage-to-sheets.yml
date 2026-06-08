@@ -1,0 +1,45 @@
+name: Backup GitHub usage to Google Sheets
+
+on:
+  workflow_dispatch:
+  schedule:
+    # 09:10 KST
+    - cron: "10 0 * * *"
+
+permissions:
+  contents: read
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    env:
+      DEFAULT_GITHUB_TOKEN: ${{ github.token }}
+      GH_TRAFFIC_TOKEN: ${{ secrets.GH_TRAFFIC_TOKEN }}
+      GOOGLE_SHEETS_WEBHOOK_URL: ${{ secrets.GOOGLE_SHEETS_WEBHOOK_URL }}
+      GOOGLE_SHEETS_WEBHOOK_SECRET: ${{ secrets.GOOGLE_SHEETS_WEBHOOK_SECRET }}
+      TRAFFIC_REPO: ${{ vars.TRAFFIC_REPO }}
+      RELEASE_REPO: ${{ vars.RELEASE_REPO }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Python dependency
+        run: python -m pip install openpyxl
+
+      - name: Upload GitHub usage backup
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${GOOGLE_SHEETS_WEBHOOK_URL:-}" ]]; then
+            echo "Missing secret: GOOGLE_SHEETS_WEBHOOK_URL"
+            exit 1
+          fi
+
+          export GITHUB_TOKEN="${GH_TRAFFIC_TOKEN:-$DEFAULT_GITHUB_TOKEN}"
+          REPO="${TRAFFIC_REPO:-$GITHUB_REPOSITORY}"
+          RELEASE="${RELEASE_REPO:-$REPO}"
+
+          python usage_monitor/github_usage_monitor.py \
+            --repo "$REPO" \
+            --release-repo "$RELEASE"
