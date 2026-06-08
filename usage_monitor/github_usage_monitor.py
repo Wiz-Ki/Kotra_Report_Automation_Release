@@ -12,6 +12,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 from datetime import datetime, timezone
 from html import escape
 from pathlib import Path
@@ -136,7 +137,16 @@ def json_post(url: str, payload: dict[str, Any], headers: dict[str, str] | None 
     try:
         with urlopen(request, timeout=30) as response:
             text = response.read().decode("utf-8")
-            return json.loads(text) if text else {}
+            if not text:
+                return {}
+            try:
+                result = json.loads(text)
+            except json.JSONDecodeError as exc:
+                preview = text[:1000].replace("\n", " ")
+                raise RuntimeError(f"Cloud upload returned a non-JSON response: {preview}") from exc
+            if isinstance(result, dict) and result.get("ok") is False:
+                raise RuntimeError(f"Cloud upload failed: {result}")
+            return result
     except HTTPError as exc:
         body_text = exc.read().decode("utf-8", errors="replace")
         raise RuntimeError(f"Cloud upload returned {exc.code}: {body_text}") from exc
