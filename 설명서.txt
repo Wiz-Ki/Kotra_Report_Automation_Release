@@ -23,6 +23,43 @@ GUI에서 원하는 .xlsx 파일을 직접 선택하면 됩니다.
 - 희망진출국가 
 
 
+<저장 파일명 커스텀>
+
+기본값은 KOTRA 사이트 기본 파일명으로 저장됩니다.
+
+GUI에서 저장 파일명 커스텀을 켜면 항목과 문자를 조각으로 추가할 수 있습니다.
+추가한 조각은 드래그해서 순서를 바꾸거나 x 버튼으로 삭제합니다.
+
+사용 가능 항목:
+
+- 연번: {row_index}
+- HS CODE: {hs_code}
+- 수출품명: {product_name}
+- 희망진출국가: {target_country}
+- 생성날짜: {date}
+- 생성시간: {time}
+- 생성일시: {datetime}
+- 생성연도: {year}
+- 생성월: {month}
+- 생성일: {day}
+- 생성시: {hour}
+- 생성분: {minute}
+- 생성초: {second}
+- 사이트 기본 파일명: {site_filename}
+
+예시:
+
+{target_country}_{product_name}({hs_code})_수출시장분석보고서
+
+날짜 구분자 예시:
+
+{year}-{month}-{day}_{hour}.{minute}.{second}
+
+저장 예:
+
+베트남_스킨케어(330499)_수출시장분석보고서.pdf
+
+
 <자동 재시도>
 
 처리 중 실패한 항목은 재시도 대기열에 올라가며 기본 1회에 한하여 다시 시도합니다.

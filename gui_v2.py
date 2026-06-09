@@ -13,7 +13,7 @@ from tkinter import filedialog, messagebox
 
 import customtkinter as ctk
 
-from automation import run_automation
+from automation import FILENAME_PATTERN_TOKEN_LABELS, render_filename_pattern, run_automation
 from config import (
     APP_CREDITS,
     BASE_DIR,
@@ -45,6 +45,48 @@ COLORS = {
     "danger": "#dc2626",
     "danger_hover": "#b91c1c",
     "warning": "#b45309",
+}
+
+DEFAULT_FILENAME_PATTERN = ""
+DEFAULT_FILENAME_PARTS: list[dict[str, str]] = []
+FILENAME_TOKEN_LABEL_BY_TOKEN = {token: label for label, token in FILENAME_PATTERN_TOKEN_LABELS}
+FILENAME_TEXT_SHORTCUTS = [("_", "_"), ("-", "-"), (".", "."), ("공백", " "), ("(", "("), (")", ")"), ("[", "["), ("]", "]")]
+FILENAME_PRESETS = [
+    (
+        "연번_HS_품명",
+        [
+            {"type": "token", "value": "row_index"},
+            {"type": "text", "value": "_"},
+            {"type": "token", "value": "hs_code"},
+            {"type": "text", "value": "_"},
+            {"type": "token", "value": "product_name"},
+        ],
+    ),
+    (
+        "국가_품명[HS]",
+        [
+            {"type": "token", "value": "target_country"},
+            {"type": "text", "value": "_"},
+            {"type": "token", "value": "product_name"},
+            {"type": "text", "value": "["},
+            {"type": "token", "value": "hs_code"},
+            {"type": "text", "value": "]"},
+        ],
+    ),
+    (
+        "사이트기본_생성일시",
+        [
+            {"type": "token", "value": "site_filename"},
+            {"type": "text", "value": "_"},
+            {"type": "token", "value": "datetime"},
+        ],
+    ),
+]
+FILENAME_PREVIEW_ROW = {
+    "row_index": 1,
+    "hs_code": "330499",
+    "product_name": "스킨케어",
+    "target_country": "베트남",
 }
 
 
@@ -215,6 +257,10 @@ class KotraReportAppV2(ctk.CTk):
         self.background = tk.BooleanVar(value=False)
         self.use_session = tk.BooleanVar(value=False)
         self.auto_retry = tk.BooleanVar(value=True)
+        self.custom_filename = tk.BooleanVar(value=False)
+        self.filename_pattern = tk.StringVar(value=DEFAULT_FILENAME_PATTERN)
+        self.filename_text_part = tk.StringVar(value="")
+        self.filename_preview = tk.StringVar(value="")
         self.parallel_sessions = tk.StringVar(value=str(DEFAULT_PARALLEL_SESSIONS))
         self.status = tk.StringVar(value="대기 중")
         self.progress = tk.StringVar(value="0 / 0")
@@ -233,6 +279,17 @@ class KotraReportAppV2(ctk.CTk):
         self.background_switch: ctk.CTkSwitch | None = None
         self.use_session_switch: ctk.CTkSwitch | None = None
         self.auto_retry_switch: ctk.CTkSwitch | None = None
+        self.filename_custom_switch: ctk.CTkSwitch | None = None
+        self.filename_custom_frame: ctk.CTkFrame | None = None
+        self.filename_parts_frame: ctk.CTkFrame | None = None
+        self.filename_text_entry: ctk.CTkEntry | None = None
+        self.filename_text_placeholder_label: ctk.CTkLabel | None = None
+        self.filename_token_buttons: list[ctk.CTkButton] = []
+        self.filename_text_buttons: list[ctk.CTkButton] = []
+        self.filename_preset_buttons: list[ctk.CTkButton] = []
+        self.filename_chip_widgets: list[ctk.CTkFrame] = []
+        self.filename_chip_remove_buttons: list[ctk.CTkButton] = []
+        self.filename_reset_button: ctk.CTkButton | None = None
         self.parallel_options_frame: ctk.CTkFrame | None = None
         self.parallel_sessions_menu: ctk.CTkOptionMenu | None = None
         self.mode_buttons: dict[str, ctk.CTkButton] = {}
@@ -241,12 +298,21 @@ class KotraReportAppV2(ctk.CTk):
         self.stop_requested = False
         self.force_stop_requested = False
         self.auto_retry_runtime_enabled = True
+        self.active_filename_pattern = ""
+        self.filename_parts = [part.copy() for part in DEFAULT_FILENAME_PARTS]
+        self.filename_drag_index: int | None = None
+        self.filename_drag_start: tuple[int, int] | None = None
+        self.filename_drag_active = False
+        self.filename_drag_target_index: int | None = None
+        self.filename_drag_ghost: tk.Toplevel | None = None
         self.parallel_options_enabled = False
         self.creator_click_count = 0
         self.worker: threading.Thread | None = None
         self.events: queue.Queue[tuple[str, object]] = queue.Queue()
 
         self._build_ui()
+        self.filename_text_part.trace_add("write", lambda *_args: self._refresh_filename_text_placeholder())
+        self._sync_filename_pattern_from_parts()
         self.after(200, self._poll_events)
 
     def _attach_tooltip(self, widget: tk.Widget, text: str) -> None:
@@ -350,9 +416,9 @@ class KotraReportAppV2(ctk.CTk):
         input_button.grid(row=0, column=2, sticky="e", padx=18, pady=(18, 8))
         self._attach_tooltip(input_button, "보고서 자동생성에 사용할 엑셀 파일을 선택합니다.")
 
-        self._field_label(panel, "다운로드 위치").grid(row=1, column=0, sticky="w", padx=18, pady=(8, 18))
+        self._field_label(panel, "다운로드 위치").grid(row=1, column=0, sticky="w", padx=18, pady=(8, 8))
         ctk.CTkEntry(panel, textvariable=self.download_dir, height=38, border_color=COLORS["border"]).grid(
-            row=1, column=1, sticky="ew", pady=(8, 18)
+            row=1, column=1, sticky="ew", pady=(8, 8)
         )
         download_button = ctk.CTkButton(
             panel,
@@ -366,8 +432,220 @@ class KotraReportAppV2(ctk.CTk):
             text_color=COLORS["text"],
             command=self._choose_download_dir,
         )
-        download_button.grid(row=1, column=2, sticky="e", padx=18, pady=(8, 18))
+        download_button.grid(row=1, column=2, sticky="e", padx=18, pady=(8, 8))
         self._attach_tooltip(download_button, "완성된 PDF 보고서를 저장할 폴더를 선택합니다.")
+
+        self.filename_custom_switch = ctk.CTkSwitch(
+            panel,
+            text="저장 파일명 커스텀",
+            variable=self.custom_filename,
+            command=self._on_filename_custom_toggled,
+            fg_color="#cbd5e1",
+            progress_color=COLORS["primary"],
+            button_color="#ffffff",
+            button_hover_color="#f8fafc",
+            text_color=COLORS["text"],
+            font=ctk.CTkFont(size=14, weight="bold"),
+        )
+        self.filename_custom_switch.grid(row=2, column=0, columnspan=3, sticky="w", padx=18, pady=(6, 10))
+        self._attach_tooltip(self.filename_custom_switch, "원하는 항목과 문자를 조합해 PDF 저장 파일명을 직접 지정합니다.")
+        self._build_filename_custom_panel(panel)
+
+    def _build_filename_custom_panel(self, parent: ctk.CTkFrame) -> None:
+        frame = ctk.CTkFrame(
+            parent,
+            fg_color=COLORS["surface_alt"],
+            border_width=1,
+            border_color="#e2e8f0",
+            corner_radius=8,
+        )
+        frame.grid(row=3, column=0, columnspan=3, sticky="ew", padx=18, pady=(0, 18))
+        frame.grid_columnconfigure(1, weight=1)
+
+        self._field_label(frame, "파일명 구성").grid(row=0, column=0, sticky="nw", padx=14, pady=(14, 8))
+        parts_row = ctk.CTkFrame(frame, fg_color="transparent")
+        parts_row.grid(row=0, column=1, sticky="ew", padx=(8, 14), pady=(14, 8))
+        parts_row.grid_columnconfigure(0, weight=1)
+        self.filename_parts_frame = ctk.CTkFrame(
+            parts_row,
+            fg_color=COLORS["surface"],
+            border_width=1,
+            border_color=COLORS["border"],
+            corner_radius=8,
+        )
+        self.filename_parts_frame.grid(row=0, column=0, sticky="ew")
+        self.filename_parts_frame.configure(height=44)
+        self.filename_parts_frame.grid_propagate(False)
+        self.filename_parts_frame.bind("<Configure>", lambda _event: self._layout_filename_parts(), add="+")
+        self.filename_reset_button = ctk.CTkButton(
+            parts_row,
+            text="초기화",
+            width=72,
+            height=36,
+            fg_color=COLORS["surface"],
+            hover_color="#edf2f7",
+            border_width=1,
+            border_color=COLORS["border"],
+            text_color=COLORS["text"],
+            command=self._reset_filename_parts,
+        )
+        self.filename_reset_button.grid(row=0, column=1, sticky="ne", padx=(8, 0))
+        self._attach_tooltip(self.filename_reset_button, "파일명 구성을 모두 비우고 KOTRA 사이트 기본 파일명을 사용합니다.")
+
+        ctk.CTkLabel(
+            frame,
+            text="추천 조합",
+            text_color=COLORS["text"],
+            font=ctk.CTkFont(size=14, weight="bold"),
+            anchor="w",
+        ).grid(row=1, column=0, sticky="nw", padx=14, pady=(6, 8))
+
+        preset_frame = ctk.CTkFrame(frame, fg_color="transparent")
+        preset_frame.grid(row=1, column=1, sticky="ew", padx=(8, 14), pady=(4, 8))
+        self.filename_preset_buttons = []
+        for label, parts in FILENAME_PRESETS:
+            button = ctk.CTkButton(
+                preset_frame,
+                text=label,
+                width=self._compact_button_width(label, min_width=86, extra=30),
+                height=32,
+                fg_color=COLORS["primary_soft"],
+                hover_color="#dbeafe",
+                border_width=1,
+                border_color="#c7d8ff",
+                text_color=COLORS["primary"],
+                command=lambda item_parts=parts: self._apply_filename_preset(item_parts),
+            )
+            button.pack(side="left", padx=(0, 6), pady=3)
+            self._attach_tooltip(button, "현재 파일명 구성을 이 추천 조합으로 바꿉니다.")
+            self.filename_preset_buttons.append(button)
+
+        ctk.CTkLabel(
+            frame,
+            text="항목 추가",
+            text_color=COLORS["text"],
+            font=ctk.CTkFont(size=14, weight="bold"),
+            anchor="w",
+        ).grid(row=2, column=0, sticky="nw", padx=14, pady=(6, 8))
+
+        token_frame = ctk.CTkFrame(frame, fg_color="transparent")
+        token_frame.grid(row=2, column=1, sticky="ew", padx=(8, 14), pady=(4, 8))
+
+        self.filename_token_buttons = []
+        token_rows = [
+            ctk.CTkFrame(token_frame, fg_color="transparent"),
+            ctk.CTkFrame(token_frame, fg_color="transparent"),
+        ]
+        for row_frame in token_rows:
+            row_frame.pack(anchor="w", pady=(0, 4))
+
+        for index, (label, token) in enumerate(FILENAME_PATTERN_TOKEN_LABELS):
+            row_frame = token_rows[0 if index < 5 else 1]
+            button = ctk.CTkButton(
+                row_frame,
+                text=label,
+                width=self._compact_button_width(label),
+                height=32,
+                fg_color=COLORS["surface"],
+                hover_color="#edf2f7",
+                border_width=1,
+                border_color=COLORS["border"],
+                text_color=COLORS["text"],
+                command=lambda item_token=token: self._add_filename_token_part(item_token),
+            )
+            button.pack(side="left", padx=(0, 6), pady=3)
+            self._attach_tooltip(button, f"파일명 구성에 {label} 항목을 추가합니다.")
+            self.filename_token_buttons.append(button)
+
+        ctk.CTkLabel(
+            frame,
+            text="문자 추가",
+            text_color=COLORS["text"],
+            font=ctk.CTkFont(size=14, weight="bold"),
+            anchor="w",
+        ).grid(row=3, column=0, sticky="nw", padx=14, pady=(6, 8))
+
+        text_frame = ctk.CTkFrame(frame, fg_color="transparent")
+        text_frame.grid(row=3, column=1, sticky="ew", padx=(8, 14), pady=(4, 8))
+        text_frame.grid_columnconfigure(0, weight=1)
+        self.filename_text_entry = ctk.CTkEntry(
+            text_frame,
+            textvariable=self.filename_text_part,
+            height=32,
+            border_color=COLORS["border"],
+        )
+        self.filename_text_entry.grid(row=0, column=0, sticky="ew", padx=(0, 6), pady=3)
+        self._attach_tooltip(self.filename_text_entry, "파일명에 넣을 고정 문구를 입력합니다.")
+        self.filename_text_placeholder_label = ctk.CTkLabel(
+            text_frame,
+            text="추가할 문구를 입력하세요",
+            text_color=COLORS["muted"],
+            fg_color="transparent",
+            font=ctk.CTkFont(size=13),
+            height=18,
+        )
+        self.filename_text_placeholder_label.place(x=14, y=10)
+        self.filename_text_placeholder_label.bind(
+            "<Button-1>",
+            lambda _event: self.filename_text_entry.focus_set() if self.filename_text_entry is not None else None,
+            add="+",
+        )
+
+        add_text_button = ctk.CTkButton(
+            text_frame,
+            text="문자 추가",
+            width=92,
+            height=32,
+            fg_color=COLORS["surface"],
+            hover_color="#edf2f7",
+            border_width=1,
+            border_color=COLORS["border"],
+            text_color=COLORS["text"],
+            command=self._add_filename_custom_text_part,
+        )
+        add_text_button.grid(row=0, column=1, sticky="e", padx=(0, 0), pady=3)
+        self._attach_tooltip(add_text_button, "입력한 고정 문구를 파일명 구성에 추가합니다.")
+        self.filename_text_buttons = [add_text_button]
+
+        shortcut_frame = ctk.CTkFrame(text_frame, fg_color="transparent")
+        shortcut_frame.grid(row=1, column=0, columnspan=2, sticky="w", pady=(2, 0))
+        for index, (label, value) in enumerate(FILENAME_TEXT_SHORTCUTS):
+            button = ctk.CTkButton(
+                shortcut_frame,
+                text=label,
+                width=58,
+                height=28,
+                fg_color=COLORS["surface"],
+                hover_color="#edf2f7",
+                border_width=1,
+                border_color=COLORS["border"],
+                text_color=COLORS["text"],
+                command=lambda item_value=value: self._add_filename_text_part(item_value),
+            )
+            button.grid(row=0, column=index, sticky="w", padx=(0 if index == 0 else 4, 0), pady=3)
+            self._attach_tooltip(button, f"파일명 구성에 {label} 문자를 추가합니다.")
+            self.filename_text_buttons.append(button)
+
+        ctk.CTkLabel(
+            frame,
+            text="미리보기",
+            text_color=COLORS["text"],
+            font=ctk.CTkFont(size=14, weight="bold"),
+            anchor="w",
+        ).grid(row=4, column=0, sticky="w", padx=14, pady=(4, 14))
+        ctk.CTkLabel(
+            frame,
+            textvariable=self.filename_preview,
+            text_color=COLORS["muted"],
+            font=ctk.CTkFont(size=13),
+            anchor="w",
+            justify="left",
+            wraplength=760,
+        ).grid(row=4, column=1, sticky="ew", padx=(8, 14), pady=(4, 14))
+
+        self.filename_custom_frame = frame
+        self._render_filename_parts()
+        frame.grid_remove()
 
     def _build_options_panel(self, parent: ctk.CTkFrame) -> None:
         panel = self._section(parent, 2, "실행 옵션")
@@ -668,6 +946,9 @@ class KotraReportAppV2(ctk.CTk):
     def _field_label(self, parent: ctk.CTkFrame, text: str) -> ctk.CTkLabel:
         return ctk.CTkLabel(parent, text=text, text_color=COLORS["text"], font=ctk.CTkFont(size=14, weight="bold"))
 
+    def _compact_button_width(self, text: str, min_width: int = 48, extra: int = 26) -> int:
+        return max(min_width, min(150, len(text) * 12 + extra))
+
     def _build_mode_selector(self, parent: ctk.CTkFrame) -> ctk.CTkFrame:
         selector = ctk.CTkFrame(parent, fg_color="#eef3f9", corner_radius=10)
         for column in range(2):
@@ -755,6 +1036,338 @@ class KotraReportAppV2(ctk.CTk):
         if step != 0:
             self.log_text.yview_scroll(step, "units")
         return "break"
+
+    def _on_filename_custom_toggled(self) -> None:
+        if self.filename_custom_frame is None:
+            return
+        if self.custom_filename.get():
+            self.filename_custom_frame.grid()
+        else:
+            self.filename_custom_frame.grid_remove()
+        self._sync_filename_pattern_from_parts()
+        self._set_filename_custom_controls_state(running=bool(self.worker and self.worker.is_alive()))
+
+    def _add_filename_token_part(self, token: str) -> None:
+        self.filename_parts.append({"type": "token", "value": token})
+        self._render_filename_parts()
+        self._sync_filename_pattern_from_parts()
+
+    def _add_filename_text_part(self, text: str) -> None:
+        if not text:
+            return
+        self.filename_parts.append({"type": "text", "value": text})
+        self._render_filename_parts()
+        self._sync_filename_pattern_from_parts()
+
+    def _add_filename_custom_text_part(self) -> None:
+        self._add_filename_text_part(self.filename_text_part.get())
+
+    def _apply_filename_preset(self, parts: list[dict[str, str]]) -> None:
+        self.filename_parts = [part.copy() for part in parts]
+        self._render_filename_parts()
+        self._sync_filename_pattern_from_parts()
+
+    def _refresh_filename_text_placeholder(self) -> None:
+        if self.filename_text_placeholder_label is None:
+            return
+        if self.filename_text_part.get():
+            self.filename_text_placeholder_label.place_forget()
+        else:
+            self.filename_text_placeholder_label.place(x=14, y=10)
+
+    def _reset_filename_parts(self) -> None:
+        self.filename_parts = []
+        self._render_filename_parts()
+        self._sync_filename_pattern_from_parts()
+
+    def _remove_filename_part(self, index: int) -> None:
+        if 0 <= index < len(self.filename_parts):
+            self.filename_parts.pop(index)
+            self._render_filename_parts()
+            self._sync_filename_pattern_from_parts()
+
+    def _filename_part_pattern(self, part: dict[str, str]) -> str:
+        if part.get("type") == "token":
+            return f"{{{part.get('value', '')}}}"
+        return part.get("value", "")
+
+    def _filename_part_label(self, part: dict[str, str]) -> str:
+        if part.get("type") == "token":
+            return FILENAME_TOKEN_LABEL_BY_TOKEN.get(part.get("value", ""), part.get("value", ""))
+        value = part.get("value", "")
+        if value == " ":
+            return "공백"
+        return value
+
+    def _filename_pattern_from_parts(self) -> str:
+        return "".join(self._filename_part_pattern(part) for part in self.filename_parts)
+
+    def _sync_filename_pattern_from_parts(self) -> None:
+        self.filename_pattern.set(self._filename_pattern_from_parts())
+        self._update_filename_preview()
+
+    def _render_filename_parts(self) -> None:
+        if self.filename_parts_frame is None:
+            return
+
+        for child in self.filename_parts_frame.winfo_children():
+            child.destroy()
+
+        self.filename_chip_widgets = []
+        self.filename_chip_remove_buttons = []
+        if not self.filename_parts:
+            empty_label = ctk.CTkLabel(
+                self.filename_parts_frame,
+                text="파일명 구성이 비어 있으면 사이트 기본 파일명으로 저장합니다.",
+                text_color=COLORS["muted"],
+                font=ctk.CTkFont(size=13),
+            )
+            empty_label.place(x=10, y=10)
+            self.filename_parts_frame.configure(height=44)
+            return
+
+        for index, part in enumerate(self.filename_parts):
+            chip = ctk.CTkFrame(
+                self.filename_parts_frame,
+                fg_color="#e8f0ff" if part.get("type") == "token" else "#ffffff",
+                border_width=1,
+                border_color=COLORS["border"],
+                corner_radius=6,
+            )
+            chip.place(x=4, y=4)
+
+            label = ctk.CTkLabel(
+                chip,
+                text=self._filename_part_label(part),
+                text_color=COLORS["primary"] if part.get("type") == "token" else COLORS["text"],
+                font=ctk.CTkFont(size=12, weight="bold" if part.get("type") == "token" else "normal"),
+                anchor="w",
+            )
+            label.grid(row=0, column=0, sticky="w", padx=(8, 2), pady=4)
+
+            remove_button = ctk.CTkButton(
+                chip,
+                text="×",
+                width=22,
+                height=20,
+                fg_color="transparent",
+                hover_color="#e2e8f0",
+                text_color=COLORS["muted"],
+                command=lambda item_index=index: self._remove_filename_part(item_index),
+            )
+            remove_button.grid(row=0, column=1, sticky="e", padx=(0, 4), pady=3)
+            self._attach_tooltip(remove_button, "이 조각을 삭제합니다.")
+
+            for widget in (chip, label):
+                widget.bind("<ButtonPress-1>", lambda event, item_index=index: self._start_filename_part_drag(event, item_index), add="+")
+                widget.bind("<B1-Motion>", self._move_filename_part_drag, add="+")
+                widget.bind("<ButtonRelease-1>", self._finish_filename_part_drag, add="+")
+
+            self.filename_chip_widgets.append(chip)
+            self.filename_chip_remove_buttons.append(remove_button)
+
+        self.after_idle(self._layout_filename_parts)
+        self._set_filename_custom_controls_state(running=bool(self.worker and self.worker.is_alive()))
+
+    def _layout_filename_parts(self) -> None:
+        if self.filename_parts_frame is None or not self.filename_chip_widgets:
+            return
+
+        available_width = max(120, self.filename_parts_frame.winfo_width() - 8)
+        x = 4
+        y = 4
+        row_height = 0
+        gap = 6
+
+        for chip in self.filename_chip_widgets:
+            chip.update_idletasks()
+            width = chip.winfo_reqwidth()
+            height = chip.winfo_reqheight()
+            if x > 4 and x + width > available_width:
+                x = 4
+                y += row_height + gap
+                row_height = 0
+            chip.place_configure(x=x, y=y)
+            x += width + gap
+            row_height = max(row_height, height)
+
+        self.filename_parts_frame.configure(height=max(44, y + row_height + 4))
+
+    def _start_filename_part_drag(self, event: tk.Event, index: int) -> None:
+        if self.worker and self.worker.is_alive():
+            return
+        self.filename_drag_index = index
+        self.filename_drag_start = (event.x_root, event.y_root)
+        self.filename_drag_active = False
+        self.filename_drag_target_index = None
+
+    def _move_filename_part_drag(self, event: tk.Event) -> None:
+        if self.filename_drag_index is None or self.worker and self.worker.is_alive():
+            return
+        if not self.filename_drag_active:
+            if not self._filename_drag_threshold_met(event.x_root, event.y_root):
+                return
+            self.filename_drag_active = True
+            self._show_filename_drag_ghost(self.filename_drag_index)
+            self._refresh_filename_drag_highlight()
+
+        self._move_filename_drag_ghost(event.x_root, event.y_root)
+        target_index = self._filename_part_index_at_pointer(event.x_root, event.y_root, self.filename_drag_index)
+        if target_index != self.filename_drag_target_index:
+            self.filename_drag_target_index = target_index
+            self._refresh_filename_drag_highlight()
+
+    def _finish_filename_part_drag(self, event: tk.Event) -> None:
+        source_index = self.filename_drag_index
+        was_dragging = self.filename_drag_active
+        self.filename_drag_index = None
+        self.filename_drag_start = None
+        self.filename_drag_active = False
+        self._hide_filename_drag_ghost()
+
+        if source_index is None or self.worker and self.worker.is_alive():
+            self.filename_drag_target_index = None
+            self._refresh_filename_drag_highlight()
+            return
+        if not was_dragging:
+            return
+
+        target_index = self._filename_part_index_at_pointer(event.x_root, event.y_root, source_index)
+        self.filename_drag_target_index = None
+        if target_index is None or target_index == source_index:
+            self._refresh_filename_drag_highlight()
+            return
+
+        part = self.filename_parts.pop(source_index)
+        self.filename_parts.insert(max(0, target_index), part)
+        self._render_filename_parts()
+        self._sync_filename_pattern_from_parts()
+
+    def _filename_drag_threshold_met(self, x_root: int, y_root: int) -> bool:
+        if self.filename_drag_start is None:
+            return False
+        start_x, start_y = self.filename_drag_start
+        return abs(x_root - start_x) >= 6 or abs(y_root - start_y) >= 6
+
+    def _refresh_filename_drag_highlight(self) -> None:
+        for index, widget in enumerate(self.filename_chip_widgets):
+            if index >= len(self.filename_parts):
+                continue
+            part = self.filename_parts[index]
+            is_drag_source = index == self.filename_drag_index and self.filename_drag_active
+            is_drag_target = index == self.filename_drag_target_index and index != self.filename_drag_index
+            widget.configure(
+                fg_color="#f8fafc" if is_drag_source else ("#e8f0ff" if part.get("type") == "token" else "#ffffff"),
+                border_color=COLORS["primary"] if is_drag_target else COLORS["border"],
+            )
+
+    def _show_filename_drag_ghost(self, index: int) -> None:
+        self._hide_filename_drag_ghost()
+        if not (0 <= index < len(self.filename_parts)):
+            return
+
+        part = self.filename_parts[index]
+        ghost = tk.Toplevel(self)
+        ghost.withdraw()
+        ghost.overrideredirect(True)
+        ghost.attributes("-topmost", True)
+        if sys.platform == "darwin":
+            ghost.configure(bg="systemTransparent")
+            ghost.wm_attributes("-transparent", True)
+        else:
+            ghost.configure(bg=COLORS["surface"])
+
+        chip = ctk.CTkFrame(
+            ghost,
+            fg_color="#e8f0ff" if part.get("type") == "token" else "#ffffff",
+            border_width=1,
+            border_color=COLORS["primary"],
+            corner_radius=6,
+        )
+        chip.pack()
+        ctk.CTkLabel(
+            chip,
+            text=self._filename_part_label(part),
+            text_color=COLORS["primary"] if part.get("type") == "token" else COLORS["text"],
+            font=ctk.CTkFont(size=12, weight="bold" if part.get("type") == "token" else "normal"),
+        ).pack(padx=10, pady=5)
+
+        self.filename_drag_ghost = ghost
+
+    def _move_filename_drag_ghost(self, x_root: int, y_root: int) -> None:
+        if self.filename_drag_ghost is None:
+            return
+        self.filename_drag_ghost.geometry(f"+{x_root + 12}+{y_root + 10}")
+        self.filename_drag_ghost.deiconify()
+        self.filename_drag_ghost.lift()
+
+    def _hide_filename_drag_ghost(self) -> None:
+        if self.filename_drag_ghost is None:
+            return
+        try:
+            self.filename_drag_ghost.destroy()
+        except tk.TclError:
+            pass
+        self.filename_drag_ghost = None
+
+    def _filename_part_index_at_pointer(self, x_root: int, y_root: int, source_index: int) -> int | None:
+        target_index: int | None = None
+        nearest_distance: float | None = None
+        for index, widget in enumerate(self.filename_chip_widgets):
+            if index == source_index:
+                continue
+            left = widget.winfo_rootx()
+            top = widget.winfo_rooty()
+            width = max(1, widget.winfo_width())
+            height = max(1, widget.winfo_height())
+            right = left + width
+            bottom = top + height
+            if left <= x_root <= right and top <= y_root <= bottom:
+                return index
+
+            center_x = left + width / 2
+            center_y = top + height / 2
+            distance = ((x_root - center_x) ** 2) + ((y_root - center_y) ** 2)
+            if nearest_distance is None or distance < nearest_distance:
+                nearest_distance = distance
+                target_index = index
+        return target_index
+
+    def _update_filename_preview(self) -> None:
+        if not self.custom_filename.get():
+            self.filename_preview.set("KOTRA 사이트 기본 파일명을 사용합니다.")
+            return
+
+        pattern = self._filename_pattern_from_parts()
+        try:
+            preview = render_filename_pattern(
+                pattern,
+                FILENAME_PREVIEW_ROW,
+                suggested_filename="베트남_스킨케어(330499)_수출시장분석보고서.pdf",
+            )
+        except ValueError as exc:
+            self.filename_preview.set(str(exc))
+            return
+        self.filename_preview.set(preview)
+
+    def _filename_pattern_for_run(self) -> str | None:
+        if not self.custom_filename.get():
+            return ""
+
+        pattern = self._filename_pattern_from_parts().strip()
+        if not pattern:
+            return ""
+
+        try:
+            render_filename_pattern(
+                pattern,
+                FILENAME_PREVIEW_ROW,
+                suggested_filename="베트남_스킨케어(330499)_수출시장분석보고서.pdf",
+            )
+        except ValueError as exc:
+            messagebox.showerror("파일명 패턴 오류", str(exc))
+            return None
+        return pattern
 
     def _choose_input(self) -> None:
         path = filedialog.askopenfilename(filetypes=[("Excel files", "*.xlsx *.xls")])
@@ -945,6 +1558,11 @@ class KotraReportAppV2(ctk.CTk):
             messagebox.showerror("오류", f"엑셀 파일을 찾을 수 없습니다.\n{input_path}")
             return
 
+        filename_pattern = self._filename_pattern_for_run()
+        if filename_pattern is None:
+            return
+        self.active_filename_pattern = filename_pattern
+
         self.stop_requested = False
         self.force_stop_requested = False
         self.progress.set("0 / 0")
@@ -1007,6 +1625,25 @@ class KotraReportAppV2(ctk.CTk):
         for option_switch in (self.background_switch, self.use_session_switch):
             if option_switch is not None:
                 option_switch.configure(state="disabled" if running else "normal")
+        self._set_filename_custom_controls_state(running)
+
+    def _set_filename_custom_controls_state(self, running: bool) -> None:
+        state = "disabled" if running else "normal"
+        if self.filename_custom_switch is not None:
+            self.filename_custom_switch.configure(state=state)
+        control_state = "normal" if self.custom_filename.get() and not running else "disabled"
+        if self.filename_text_entry is not None:
+            self.filename_text_entry.configure(state=control_state)
+        for button in self.filename_token_buttons:
+            button.configure(state=control_state)
+        for button in self.filename_text_buttons:
+            button.configure(state=control_state)
+        for button in self.filename_preset_buttons:
+            button.configure(state=control_state)
+        for button in self.filename_chip_remove_buttons:
+            button.configure(state=control_state)
+        if self.filename_reset_button is not None:
+            self.filename_reset_button.configure(state=control_state)
 
     def _on_auto_retry_changed(self) -> None:
         self._sync_auto_retry_runtime(log_change=bool(self.worker and self.worker.is_alive()))
@@ -1070,6 +1707,7 @@ class KotraReportAppV2(ctk.CTk):
                 parallel_sessions=self._selected_parallel_sessions(),
                 row_retry_count=DEFAULT_ROW_RETRY_COUNT,
                 auto_retry_enabled=self._auto_retry_enabled,
+                filename_pattern=self.active_filename_pattern,
                 status_callback=lambda message: self.events.put(("status", message)),
                 progress_callback=lambda data: self.events.put(("progress", data)),
                 stop_requested=lambda: self.stop_requested,

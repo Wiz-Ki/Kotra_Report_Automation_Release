@@ -43,6 +43,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--retry-failed", action="store_true", help="logs/failed_rows.xlsx에 기록된 실패 행만 다시 실행합니다.")
     parser.add_argument("--no-auto-retry", action="store_true", help="행 처리 실패 시 기본 1회 자동 재시도를 사용하지 않습니다.")
     parser.add_argument("--parallel-sessions", type=parallel_session_count, default=1, help=f"동시에 실행할 브라우저 세션 수(1~{MAX_PARALLEL_SESSIONS})")
+    parser.add_argument(
+        "--filename-pattern",
+        default="",
+        help="저장 파일명 커스텀 패턴. 예: {row_index}_{hs_code}_{product_name}_{datetime}",
+    )
     parser.add_argument("--create-template", action="store_true", help="input_template.xlsx를 생성하고 종료합니다.")
     return parser
 
@@ -86,6 +91,7 @@ def main() -> int:
         wait_for_manual_login=args.login_wait,
         parallel_sessions=args.parallel_sessions,
         row_retry_count=0 if args.no_auto_retry else DEFAULT_ROW_RETRY_COUNT,
+        filename_pattern=args.filename_pattern,
     )
 
     print("작업이 완료되었습니다.")

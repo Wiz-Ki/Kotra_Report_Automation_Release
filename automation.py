@@ -89,6 +89,25 @@ PARALLEL_WAIT_SUMMARY_INTERVAL_SECONDS = 30
 PARALLEL_SESSION_START_DELAY_SECONDS = 3
 DEFAULT_INITIAL_FORM_WAIT_SECONDS = 10
 PARALLEL_INITIAL_FORM_WAIT_SECONDS = 15
+FILENAME_PATTERN_TOKEN_LABELS = [
+    ("연번", "row_index"),
+    ("HS CODE", "hs_code"),
+    ("수출품명", "product_name"),
+    ("희망진출국가", "target_country"),
+    ("생성날짜", "date"),
+    ("생성시간", "time"),
+    ("생성일시", "datetime"),
+    ("생성연도", "year"),
+    ("생성월", "month"),
+    ("생성일", "day"),
+    ("생성시", "hour"),
+    ("생성분", "minute"),
+    ("생성초", "second"),
+    ("사이트 기본 파일명", "site_filename"),
+]
+FILENAME_PATTERN_TOKENS = {token for _label, token in FILENAME_PATTERN_TOKEN_LABELS}
+FILENAME_PATTERN_TOKEN_RE = re.compile(r"\{([A-Za-z0-9_]+)\}")
+FILENAME_FORBIDDEN_CHARS_RE = re.compile(r'[\\/:*?"<>|]')
 
 
 class GenerationError(RuntimeError):
@@ -572,6 +591,9 @@ def download_report(
     timeout_ms: int = TIMEOUT_MS,
     status_callback: StatusCallback | None = None,
     force_stop_requested: StopFlag | None = None,
+    *,
+    row_data: dict[str, Any] | None = None,
+    filename_pattern: str = "",
 ) -> Path:
     save_path = Path(save_path)
     if save_path.exists() and save_path.is_dir():
@@ -593,19 +615,104 @@ def download_report(
         download_button.click()
 
     download = download_info.value
-    final_save_path = resolve_download_save_path(download, save_path)
+    final_save_path = resolve_download_save_path(
+        download,
+        save_path,
+        row_data=row_data,
+        filename_pattern=filename_pattern,
+    )
     download.save_as(str(final_save_path))
     if status_callback:
         status_callback("PDF 다운로드가 완료되었습니다.")
     return final_save_path
 
 
-def resolve_download_save_path(download: Any, save_path: Path) -> Path:
+def resolve_download_save_path(
+    download: Any,
+    save_path: Path,
+    *,
+    row_data: dict[str, Any] | None = None,
+    filename_pattern: str = "",
+) -> Path:
     if not (save_path.exists() and save_path.is_dir()):
         return save_path
 
     suggested_filename = str(getattr(download, "suggested_filename", "") or "").strip() or "report.pdf"
-    return unique_file_path(save_path / suggested_filename)
+    if normalize_filename_pattern(filename_pattern):
+        filename = render_filename_pattern(filename_pattern, row_data or {}, suggested_filename=suggested_filename)
+    else:
+        filename = suggested_filename
+    return unique_file_path(save_path / filename)
+
+
+def normalize_filename_pattern(filename_pattern: Any) -> str:
+    return str(filename_pattern or "").strip()
+
+
+def validate_filename_pattern(filename_pattern: Any) -> None:
+    pattern = normalize_filename_pattern(filename_pattern)
+    if not pattern:
+        return
+
+    remaining_text = FILENAME_PATTERN_TOKEN_RE.sub("", pattern)
+    if "{" in remaining_text or "}" in remaining_text:
+        raise ValueError("파일명 항목은 {hs_code}처럼 중괄호를 완성해서 입력해주세요.")
+
+    unknown_tokens = sorted({token for token in FILENAME_PATTERN_TOKEN_RE.findall(pattern) if token not in FILENAME_PATTERN_TOKENS})
+    if unknown_tokens:
+        supported = ", ".join(f"{{{token}}}" for token in sorted(FILENAME_PATTERN_TOKENS))
+        unknown = ", ".join(f"{{{token}}}" for token in unknown_tokens)
+        raise ValueError(f"지원하지 않는 파일명 항목입니다: {unknown}. 지원 항목: {supported}")
+
+
+def render_filename_pattern(
+    filename_pattern: Any,
+    row_data: dict[str, Any],
+    *,
+    suggested_filename: str = "report.pdf",
+    now: datetime | None = None,
+) -> str:
+    pattern = normalize_filename_pattern(filename_pattern)
+    if not pattern:
+        return sanitize_report_filename(suggested_filename or "report.pdf") or "report.pdf"
+
+    validate_filename_pattern(pattern)
+    current_time = now or datetime.now()
+    suggested_name = Path(str(suggested_filename or "report.pdf")).name
+    suggested_path = Path(suggested_name)
+    suffix = suggested_path.suffix or ".pdf"
+    site_filename = suggested_path.stem if suggested_path.suffix else suggested_name
+
+    values = {
+        "row_index": str(row_data.get("row_index", "")).strip(),
+        "hs_code": str(row_data.get("hs_code", "")).strip(),
+        "product_name": str(row_data.get("product_name", "")).strip(),
+        "target_country": str(row_data.get("target_country", "")).strip(),
+        "date": current_time.strftime("%Y%m%d"),
+        "time": current_time.strftime("%H%M%S"),
+        "datetime": current_time.strftime("%Y%m%d_%H%M%S"),
+        "year": current_time.strftime("%Y"),
+        "month": current_time.strftime("%m"),
+        "day": current_time.strftime("%d"),
+        "hour": current_time.strftime("%H"),
+        "minute": current_time.strftime("%M"),
+        "second": current_time.strftime("%S"),
+        "site_filename": site_filename,
+    }
+
+    rendered = FILENAME_PATTERN_TOKEN_RE.sub(lambda match: values.get(match.group(1), ""), pattern)
+    filename = sanitize_report_filename(rendered)
+    if not filename:
+        raise ValueError("파일명 패턴 결과가 비어 있습니다. 파일명 항목이나 문자를 추가해주세요.")
+
+    if suffix and not filename.lower().endswith(suffix.lower()):
+        filename = f"{filename}{suffix}"
+    return filename
+
+
+def sanitize_report_filename(filename: Any) -> str:
+    safe = FILENAME_FORBIDDEN_CHARS_RE.sub("_", str(filename or ""))
+    return safe.strip().strip(".")
 
 
 def unique_file_path(path: Path) -> Path:
@@ -708,6 +815,7 @@ def process_row(
     retry_count: int = GENERATION_RETRY_COUNT,
     status_callback: StatusCallback | None = None,
     force_stop_requested: StopFlag | None = None,
+    filename_pattern: str = "",
 ) -> Path:
     check_force_stop(force_stop_requested)
     select_direct_country_analysis(page)
@@ -721,7 +829,15 @@ def process_row(
         try:
             if status_callback:
                 status_callback("보고서 생성 요청을 보냈습니다.")
-            return download_report(page, save_path, timeout_ms, status_callback, force_stop_requested)
+            return download_report(
+                page,
+                save_path,
+                timeout_ms,
+                status_callback,
+                force_stop_requested,
+                row_data=row_data,
+                filename_pattern=filename_pattern,
+            )
         except RuntimeError as exc:
             last_error = exc
             if "초기 입력 화면" in str(exc):
@@ -854,6 +970,7 @@ def run_parallel_automation(
     parallel_sessions: int,
     row_retry_count: int,
     auto_retry_enabled: RetryFlag | None,
+    filename_pattern: str,
     status_callback: StatusCallback | None,
     progress_callback: ProgressCallback | None,
     stop_requested: StopFlag | None,
@@ -1065,6 +1182,7 @@ def run_parallel_automation(
                                 message,
                             ),
                             force_stop_requested=force_stop_requested,
+                            filename_pattern=filename_pattern,
                         )
                         with file_lock:
                             log_success_row(row_data, saved_file, log_dir)
@@ -1193,11 +1311,14 @@ def run_automation(
     parallel_sessions: int = 1,
     row_retry_count: int = DEFAULT_ROW_RETRY_COUNT,
     auto_retry_enabled: RetryFlag | None = None,
+    filename_pattern: str = "",
 ) -> dict[str, int]:
     input_excel_path = Path(input_excel_path)
     download_dir = Path(download_dir)
     log_dir = Path(log_dir)
     state_path = Path(state_path)
+    filename_pattern = normalize_filename_pattern(filename_pattern)
+    validate_filename_pattern(filename_pattern)
 
     download_dir.mkdir(parents=True, exist_ok=True)
     log_dir.mkdir(parents=True, exist_ok=True)
@@ -1275,6 +1396,7 @@ def run_automation(
             parallel_sessions=parallel_sessions,
             row_retry_count=row_retry_count,
             auto_retry_enabled=auto_retry_enabled,
+            filename_pattern=filename_pattern,
             status_callback=status_callback,
             progress_callback=progress_callback,
             stop_requested=stop_requested,
@@ -1361,6 +1483,7 @@ def run_automation(
                         retry_count,
                         status_callback=lambda message: emit_progress(completed_count, message),
                         force_stop_requested=force_stop_requested,
+                        filename_pattern=filename_pattern,
                     )
                     log_success_row(row_data, saved_file, log_dir)
                     resolve_retry_pending_failure(current_index, success=True)
