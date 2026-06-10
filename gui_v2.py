@@ -980,8 +980,8 @@ class KotraReportAppV2(ctk.CTk):
             selector.grid_columnconfigure(column, weight=1)
         self.report_mode_buttons = {}
         modes = [
-            ("수출시장 분석 보고서 생성", "direct"),
             ("유망 시장 추천 보고서 생성", "recommend"),
+            ("수출시장 분석 보고서 생성", "direct"),
         ]
         for column, (label, value) in enumerate(modes):
             button = ctk.CTkButton(
@@ -1269,7 +1269,7 @@ class KotraReportAppV2(ctk.CTk):
         self.filename_drag_target_index = None
 
     def _move_filename_part_drag(self, event: tk.Event) -> None:
-        if self.filename_drag_index is None or self.worker and self.worker.is_alive():
+        if self.filename_drag_index is None or (self.worker and self.worker.is_alive()):
             return
         if not self.filename_drag_active:
             if not self._filename_drag_threshold_met(event.x_root, event.y_root):
@@ -1292,7 +1292,7 @@ class KotraReportAppV2(ctk.CTk):
         self.filename_drag_active = False
         self._hide_filename_drag_ghost()
 
-        if source_index is None or self.worker and self.worker.is_alive():
+        if source_index is None or (self.worker and self.worker.is_alive()):
             self.filename_drag_target_index = None
             self._refresh_filename_drag_highlight()
             return

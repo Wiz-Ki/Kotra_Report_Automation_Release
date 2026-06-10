@@ -13,11 +13,15 @@ from automation import (
     completed_report_task,
     normalize_export_scale,
     normalize_hs_code,
+    read_report_task_rows,
+    report_tasks_path,
+    read_failed_rows,
     read_input_excel,
     render_filename_pattern,
     split_country_values,
     update_report_task_status,
 )
+from logger import log_failed_row
 
 
 class FilenamePatternTest(unittest.TestCase):
@@ -161,6 +165,34 @@ class FilenamePatternTest(unittest.TestCase):
             self.assertIsNone(completed_report_task(log_dir, row, TASK_TYPE_DIRECT, "베트남"))
             row["use_task_resume"] = True
             self.assertIsNotNone(completed_report_task(log_dir, row, TASK_TYPE_DIRECT, "베트남"))
+
+            update_report_task_status(log_dir, row, TASK_TYPE_DIRECT, "베트남", "처리 중")
+            task_rows = read_report_task_rows(report_tasks_path(log_dir))
+            self.assertEqual(task_rows[-1]["saved_file"], "")
+
+    def test_failed_rows_restore_report_mode_options(self) -> None:
+        with TemporaryDirectory() as tmp_dir:
+            log_dir = Path(tmp_dir) / "logs"
+            log_failed_row(
+                {
+                    "report_mode": "recommend",
+                    "recommend_then_direct": True,
+                    "row_index": 1,
+                    "hs_code": "330499",
+                    "product_name": "마스크팩",
+                    "export_scale": "성장기업 ($1,000,000 ~ $9,999,999)",
+                    "export_experience": "O",
+                    "target_country": "",
+                    "excluded_countries": "이스라엘",
+                },
+                "테스트 실패",
+                log_dir,
+            )
+
+            rows = read_failed_rows(log_dir)
+
+        self.assertEqual(rows[0]["report_mode"], "recommend")
+        self.assertEqual(rows[0]["recommend_then_direct"], "True")
 
 
 if __name__ == "__main__":

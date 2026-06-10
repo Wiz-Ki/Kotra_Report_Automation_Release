@@ -543,13 +543,15 @@ def click_generate_button(page: Page) -> None:
 
 
 def wait_until_enabled(page: Page, locator, timeout_ms: int) -> None:
+    deadline = time.monotonic() + timeout_ms / 1000
     handle = locator.element_handle(timeout=timeout_ms)
     if handle is None:
         raise RuntimeError("버튼 요소를 찾지 못했습니다.")
+    remaining_timeout_ms = max(1, int((deadline - time.monotonic()) * 1000))
     page.wait_for_function(
         "(el) => !el.disabled && el.getAttribute('aria-disabled') !== 'true'",
         arg=handle,
-        timeout=timeout_ms,
+        timeout=remaining_timeout_ms,
     )
 
 
@@ -709,9 +711,7 @@ def download_report(
     filename_pattern: str = "",
 ) -> Path:
     save_path = Path(save_path)
-    if save_path.exists() and save_path.is_dir():
-        save_path.mkdir(parents=True, exist_ok=True)
-    else:
+    if not (save_path.exists() and save_path.is_dir()):
         save_path.parent.mkdir(parents=True, exist_ok=True)
 
     status, download_button = wait_for_download_or_generation_error(page, timeout_ms, status_callback, force_stop_requested)
@@ -1851,8 +1851,13 @@ def run_automation(
 
     rows = read_failed_rows(log_dir) if retry_failed_only else read_input_excel(input_excel_path)
     for row in rows:
-        row["report_mode"] = report_mode
-        row["recommend_then_direct"] = bool(recommend_then_direct)
+        if retry_failed_only:
+            row["report_mode"] = normalize_report_mode(row.get("report_mode", report_mode))
+            raw_recommend_then_direct = str(row.get("recommend_then_direct", "")).strip()
+            row["recommend_then_direct"] = truthy(raw_recommend_then_direct) if raw_recommend_then_direct else bool(recommend_then_direct)
+        else:
+            row["report_mode"] = report_mode
+            row["recommend_then_direct"] = bool(recommend_then_direct)
         row["use_task_resume"] = bool(retry_failed_only)
     total = len(rows)
     row_retry_count = normalize_row_retry_count(row_retry_count)
@@ -2252,7 +2257,12 @@ def update_report_task_status(
 
         current_row.update(task_row)
         current_row["status"] = status
-        current_row["saved_file"] = str(saved_file) if saved_file else str(current_row.get("saved_file", ""))
+        if saved_file:
+            current_row["saved_file"] = str(saved_file)
+        elif status == STATUS_SUCCESS:
+            current_row["saved_file"] = str(current_row.get("saved_file", ""))
+        else:
+            current_row["saved_file"] = ""
         current_row["recommended_countries"] = str(row_data.get("recommended_countries", current_row.get("recommended_countries", "")))
         current_row["final_target_countries"] = str(row_data.get("final_target_countries", current_row.get("final_target_countries", "")))
         current_row["error_message"] = error_message
@@ -2426,6 +2436,8 @@ def read_failed_rows(log_dir: str | Path) -> list[dict[str, Any]]:
             raw_value = get_source_value(record, key)
             row[key] = normalize_field_value(key, raw_value)
 
+        row["report_mode"] = normalize_report_mode(str(record.get("report_mode", "")).strip())
+        row["recommend_then_direct"] = str(record.get("recommend_then_direct", "")).strip()
         row["row_index"] = int(row_index_text) if row_index_text.isdigit() else fallback_index
         row["recommended_countries"] = str(record.get("recommended_countries", "")).strip()
         row["final_target_countries"] = str(record.get("final_target_countries", "")).strip()
