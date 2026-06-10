@@ -255,7 +255,6 @@ class KotraReportAppV2(ctk.CTk):
 
         self.input_path = tk.StringVar(value=str(BASE_DIR / "input.xlsx"))
         self.download_dir = tk.StringVar(value=str(DEFAULT_DOWNLOAD_DIR))
-        self.run_mode = tk.StringVar(value="전체 실행")
         self.report_mode = tk.StringVar(value="direct")
         self.background = tk.BooleanVar(value=False)
         self.use_session = tk.BooleanVar(value=False)
@@ -275,6 +274,7 @@ class KotraReportAppV2(ctk.CTk):
         self.total_rows = tk.StringVar(value="0")
 
         self.start_button: ctk.CTkButton | None = None
+        self.retry_failed_button: ctk.CTkButton | None = None
         self.stop_button: ctk.CTkButton | None = None
         self.force_stop_button: ctk.CTkButton | None = None
         self.status_badge: ctk.CTkLabel | None = None
@@ -296,7 +296,6 @@ class KotraReportAppV2(ctk.CTk):
         self.filename_reset_button: ctk.CTkButton | None = None
         self.parallel_options_frame: ctk.CTkFrame | None = None
         self.parallel_sessions_menu: ctk.CTkOptionMenu | None = None
-        self.mode_buttons: dict[str, ctk.CTkButton] = {}
         self.report_mode_buttons: dict[str, ctk.CTkButton] = {}
         self.recommend_then_direct_frame: ctk.CTkFrame | None = None
         self.recommend_then_direct_switch: ctk.CTkSwitch | None = None
@@ -304,6 +303,7 @@ class KotraReportAppV2(ctk.CTk):
 
         self.stop_requested = False
         self.force_stop_requested = False
+        self.retry_failed_only_for_run = False
         self.auto_retry_runtime_enabled = True
         self.active_filename_pattern = ""
         self.filename_parts = [part.copy() for part in DEFAULT_FILENAME_PARTS]
@@ -667,8 +667,6 @@ class KotraReportAppV2(ctk.CTk):
         recommend_option = self._build_recommend_then_direct_option(mode_box)
         recommend_option.grid(row=2, column=0, sticky="ew", pady=(8, 0))
         self._refresh_recommend_then_direct_visibility()
-        self._field_label(mode_box, "실행 범위").grid(row=3, column=0, sticky="w", pady=(14, 8))
-        self._build_mode_selector(mode_box).grid(row=4, column=0, sticky="ew")
 
         switch_box = ctk.CTkFrame(
             panel,
@@ -725,7 +723,7 @@ class KotraReportAppV2(ctk.CTk):
 
         hint = ctk.CTkLabel(
             panel,
-            text="자동 재시도는 실행 중 변경할 수 있으며 이후 새 실패부터 반영됩니다. 실패 행 재시도는 logs/failed_rows.xlsx 기준입니다.",
+            text="자동 재시도는 실행 중 변경할 수 있으며 이후 새 실패부터 반영됩니다. 실패 행 다시 실행은 logs/failed_rows.xlsx 기준입니다.",
             font=ctk.CTkFont(size=13),
             text_color=COLORS["muted"],
             anchor="w",
@@ -865,6 +863,21 @@ class KotraReportAppV2(ctk.CTk):
         open_download_button.pack(side="left")
         self._attach_tooltip(open_download_button, "PDF 보고서가 저장되는 다운로드 폴더를 엽니다.")
 
+        self.retry_failed_button = ctk.CTkButton(
+            folders,
+            text="실패 행 다시 실행",
+            width=148,
+            height=36,
+            fg_color=COLORS["surface"],
+            hover_color="#edf2f7",
+            border_width=1,
+            border_color=COLORS["border"],
+            text_color=COLORS["text"],
+            command=self._start_retry_failed,
+        )
+        self.retry_failed_button.pack(side="left", padx=(8, 0))
+        self._attach_tooltip(self.retry_failed_button, "logs/failed_rows.xlsx에 남은 실패 항목만 다시 실행합니다.")
+
     def _build_progress_panel(self, parent: ctk.CTkFrame) -> None:
         panel = self._section(parent, 4, "진행 현황")
         for column in range(4):
@@ -961,31 +974,6 @@ class KotraReportAppV2(ctk.CTk):
     def _compact_button_width(self, text: str, min_width: int = 48, extra: int = 26) -> int:
         return max(min_width, min(150, len(text) * 12 + extra))
 
-    def _build_mode_selector(self, parent: ctk.CTkFrame) -> ctk.CTkFrame:
-        selector = ctk.CTkFrame(parent, fg_color="#eef3f9", corner_radius=10)
-        for column in range(2):
-            selector.grid_columnconfigure(column, weight=1)
-        self.mode_buttons = {}
-        modes = [("전체 실행", "전체 실행"), ("실패 행만 재시도", "실패 행만 재시도")]
-        for column, (label, value) in enumerate(modes):
-            button = ctk.CTkButton(
-                selector,
-                text=label,
-                height=38,
-                corner_radius=8,
-                border_width=0,
-                command=lambda selected=value: self._select_run_mode(selected),
-                font=ctk.CTkFont(size=14, weight="bold"),
-            )
-            button.grid(row=0, column=column, sticky="ew", padx=(4 if column == 0 else 2, 4), pady=4)
-            self.mode_buttons[value] = button
-            if value == "전체 실행":
-                self._attach_tooltip(button, "입력 엑셀의 전체 행을 처음부터 처리합니다.")
-            else:
-                self._attach_tooltip(button, "logs/failed_rows.xlsx에 기록된 실패 행만 다시 처리합니다.")
-        self._refresh_run_mode_buttons()
-        return selector
-
     def _build_report_mode_selector(self, parent: ctk.CTkFrame) -> ctk.CTkFrame:
         selector = ctk.CTkFrame(parent, fg_color="#eef3f9", corner_radius=10)
         for column in range(2):
@@ -1043,19 +1031,6 @@ class KotraReportAppV2(ctk.CTk):
         if self.report_mode.get() != "recommend":
             frame.grid_remove()
         return frame
-
-    def _select_run_mode(self, value: str) -> None:
-        self.run_mode.set(value)
-        self._refresh_run_mode_buttons()
-
-    def _refresh_run_mode_buttons(self) -> None:
-        for value, button in self.mode_buttons.items():
-            selected = self.run_mode.get() == value
-            button.configure(
-                fg_color="#ffffff" if selected else "transparent",
-                hover_color="#ffffff" if selected else "#e2eaf3",
-                text_color=COLORS["primary"] if selected else COLORS["muted"],
-            )
 
     def _select_report_mode(self, value: str) -> None:
         self.report_mode.set(value)
@@ -1641,12 +1616,18 @@ class KotraReportAppV2(ctk.CTk):
         return max(1, min(MAX_PARALLEL_SESSIONS, value))
 
     def _start(self) -> None:
+        self._start_run(retry_failed_only=False)
+
+    def _start_retry_failed(self) -> None:
+        self._start_run(retry_failed_only=True)
+
+    def _start_run(self, retry_failed_only: bool) -> None:
         if self.worker and self.worker.is_alive():
             messagebox.showwarning("실행 중", "이미 작업이 실행 중입니다.")
             return
 
         input_path = Path(self.input_path.get())
-        if self._retry_failed_only() is False and not input_path.exists():
+        if not retry_failed_only and not input_path.exists():
             messagebox.showerror("오류", f"엑셀 파일을 찾을 수 없습니다.\n{input_path}")
             return
 
@@ -1654,6 +1635,7 @@ class KotraReportAppV2(ctk.CTk):
         if filename_pattern is None:
             return
         self.active_filename_pattern = filename_pattern
+        self.retry_failed_only_for_run = retry_failed_only
 
         self.stop_requested = False
         self.force_stop_requested = False
@@ -1667,7 +1649,8 @@ class KotraReportAppV2(ctk.CTk):
         self._set_status_badge("running")
         self._set_progress(0)
         self._clear_log()
-        self._append_log("작업을 시작합니다.", "info")
+        start_message = "실패 행 다시 실행을 시작합니다." if retry_failed_only else "작업을 시작합니다."
+        self._append_log(start_message, "info")
         self._sync_auto_retry_runtime(log_change=False)
         self._set_running_state(True)
         self.worker = threading.Thread(target=self._run_worker, daemon=True)
@@ -1687,11 +1670,13 @@ class KotraReportAppV2(ctk.CTk):
         self._append_log("강제종료 요청됨: 현재 작업을 즉시 중단합니다.", "danger")
 
     def _retry_failed_only(self) -> bool:
-        return self.run_mode.get() == "실패 행만 재시도"
+        return self.retry_failed_only_for_run
 
     def _set_running_state(self, running: bool) -> None:
         if self.start_button is not None:
             self.start_button.configure(state="disabled" if running else "normal")
+        if self.retry_failed_button is not None:
+            self.retry_failed_button.configure(state="disabled" if running else "normal")
         if self.stop_button is not None:
             self.stop_button.configure(state="normal" if running else "disabled")
         if self.force_stop_button is not None:

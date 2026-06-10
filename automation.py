@@ -2259,11 +2259,39 @@ def normalize_export_scale(value: str) -> str:
     if mapped_value:
         return mapped_value
 
+    keyword_scale = export_scale_from_category_keyword(value)
+    if keyword_scale:
+        return keyword_scale
+
     amount_scale = export_scale_from_numeric_amount(value)
     if amount_scale:
         return amount_scale
 
     return value
+
+
+def export_scale_from_category_keyword(value: str) -> str | None:
+    compact = re.sub(r"\s+", "", str(value or ""))
+    if not compact:
+        return None
+
+    keyword_candidates = [
+        ("선도기업", "선도"),
+        ("선도", "선도"),
+        ("성장기업", "성장"),
+        ("성장", "성장"),
+        ("유망기업", "유망"),
+        ("유망", "유망"),
+        ("초보기업", "초보"),
+        ("초보", "초보"),
+        ("내수기업", "내수"),
+        ("내수", "내수"),
+        ("수출액없음", "내수"),
+    ]
+    for keyword, category in keyword_candidates:
+        if keyword in compact:
+            return EXPORT_SCALE_CATEGORY_MAP[category]
+    return None
 
 
 def export_scale_from_numeric_amount(value: str) -> str | None:

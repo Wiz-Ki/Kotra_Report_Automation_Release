@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 from datetime import datetime
 
-from automation import render_filename_pattern, split_country_values
+from automation import normalize_export_scale, render_filename_pattern, split_country_values
 
 
 class FilenamePatternTest(unittest.TestCase):
@@ -82,6 +82,20 @@ class FilenamePatternTest(unittest.TestCase):
 
     def test_splits_country_values(self) -> None:
         self.assertEqual(split_country_values("베트남, 미국/일본\n베트남"), ["베트남", "미국", "일본"])
+
+    def test_normalizes_export_scale_with_mixed_amount_text(self) -> None:
+        self.assertEqual(
+            normalize_export_scale("성장기업($1,000,000 이상)"),
+            "성장기업 ($1,000,000 ~ $9,999,999)",
+        )
+        self.assertEqual(
+            normalize_export_scale("전년도 기준 선도기업 금액"),
+            "선도기업 ($10,000,000 ~)",
+        )
+        self.assertEqual(
+            normalize_export_scale("내수기업(수출액 없음)"),
+            "내수기업 (수출액 없음)",
+        )
 
 
 if __name__ == "__main__":
