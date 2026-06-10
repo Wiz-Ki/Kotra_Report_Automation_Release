@@ -2111,6 +2111,9 @@ def read_input_excel(input_excel_path: str | Path) -> list[dict[str, Any]]:
                 raw_value = find_category_value(record)
             row[key] = normalize_field_value(key, raw_value)
 
+        if not is_processable_input_row(row):
+            continue
+
         row_index_value = normalize_row_index(get_source_value(record, "row_index"), idx)
         row["row_index"] = row_index_value
         row["excel_row_number"] = idx + 1
@@ -2124,6 +2127,10 @@ def read_input_excel(input_excel_path: str | Path) -> list[dict[str, Any]]:
         rows.append(row)
 
     return rows
+
+
+def is_processable_input_row(row: dict[str, Any]) -> bool:
+    return any(str(row.get(key, "")).strip() for key in ("hs_code", "product_name", "export_scale", "export_experience"))
 
 
 def normalize_row_index(value: Any, fallback_index: int) -> int:
@@ -2248,7 +2255,11 @@ def normalize_field_value(field_name: str, value: Any) -> str:
         normalized = text.upper()
         if normalized in {"O", "X"}:
             return normalized
-        return EXPORT_EXPERIENCE_CATEGORY_MAP.get(text, text)
+        mapped_value = EXPORT_EXPERIENCE_CATEGORY_MAP.get(text)
+        if mapped_value is not None:
+            return mapped_value
+        compact_map = {str(key).replace(" ", ""): mapped for key, mapped in EXPORT_EXPERIENCE_CATEGORY_MAP.items()}
+        return compact_map.get(text.replace(" ", ""), text)
 
     if field_name in {"target_country", "excluded_countries"}:
         return normalize_target_country(text)

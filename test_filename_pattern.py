@@ -2,8 +2,12 @@ from __future__ import annotations
 
 import unittest
 from datetime import datetime
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
-from automation import normalize_export_scale, normalize_hs_code, render_filename_pattern, split_country_values
+import pandas as pd
+
+from automation import normalize_export_scale, normalize_hs_code, read_input_excel, render_filename_pattern, split_country_values
 
 
 class FilenamePatternTest(unittest.TestCase):
@@ -100,6 +104,34 @@ class FilenamePatternTest(unittest.TestCase):
     def test_normalizes_ten_digit_hs_code_to_six_digits(self) -> None:
         self.assertEqual(normalize_hs_code("3304990000"), "330499")
         self.assertEqual(normalize_hs_code("330499.0"), "330499")
+
+    def test_reads_external_request_template_shape(self) -> None:
+        with TemporaryDirectory() as tmp_dir:
+            path = Path(tmp_dir) / "request_template.xlsx"
+            pd.DataFrame(
+                [
+                    {
+                        "연번": "1",
+                        "HSCODE 10단위\n(모르는 경우 생략 가능)": "3307904000",
+                        "HSCODE 6단위": "330499",
+                        "수출품명": "마스크팩",
+                        "수출액 규모": "성장기업 ($1,000,000~$9,999,999)",
+                        "해당 품목 수출경험": "수출경험 있음",
+                        "희망 진출국 (최대 2개국)\n(없는 경우 생략 가능)": "베트남, 미국",
+                        "분석 제외 국가\n(없는 경우 생략 가능)": "이스라엘",
+                    },
+                    {"희망 진출국 (최대 2개국)\n(없는 경우 생략 가능)": "베트남"},
+                    {"희망 진출국 (최대 2개국)\n(없는 경우 생략 가능)": "-"},
+                ]
+            ).to_excel(path, index=False)
+
+            rows = read_input_excel(path)
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["hs_code"], "330499")
+        self.assertEqual(rows[0]["export_experience"], "O")
+        self.assertEqual(rows[0]["target_country"], "베트남, 미국")
+        self.assertEqual(rows[0]["excluded_countries"], "이스라엘")
 
 
 if __name__ == "__main__":
