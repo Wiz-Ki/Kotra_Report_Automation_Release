@@ -1591,7 +1591,19 @@ class KotraReportAppV2(ctk.CTk):
         if parent_widgets is None:
             return
         child_keys = sorted(self._child_keys_by_parent.get(parent_key, []), key=self._task_sort_key)
-        if not child_keys:
+        toggle = parent_widgets.get("child_toggle")
+        if len(child_keys) <= 1:
+            self._child_expanded_parents.discard(parent_key)
+            if toggle is not None:
+                toggle.grid_forget()
+            for key in child_keys:
+                widgets = self._progress_row_widgets.get(key)
+                if widgets is not None:
+                    widgets["frame"].pack_forget()
+            children_frame = parent_widgets["children_frame"]
+            if parent_widgets.get("children_visible"):
+                children_frame.pack_forget()
+                parent_widgets["children_visible"] = False
             return
 
         # 자동 펼침 없음: 사용자가 토글을 눌렀을 때만 자식 행을 보여준다.
@@ -1599,12 +1611,11 @@ class KotraReportAppV2(ctk.CTk):
         expanded = parent_key in self._child_expanded_parents
         visible_keys = child_keys if expanded else []
 
-        toggle = parent_widgets.get("child_toggle")
         if toggle is not None:
             toggle.configure(
-                text=("접기" if expanded else f"작업 {len(child_keys)}개"),
+                text=("▼ 접기" if expanded else f"▶ 작업 {len(child_keys)}개"),
                 command=lambda key=parent_key: self._toggle_child_tasks(key),
-                width=68 if expanded else 82,
+                width=76 if expanded else 92,
             )
             toggle.grid(row=1, column=1, sticky="e", padx=(8, 0), pady=(0, 1))
 
