@@ -157,6 +157,38 @@ class FilenamePatternTest(unittest.TestCase):
         self.assertEqual(row["company_name"], "테스트기업 A")
         self.assertEqual(row["business_number"], "0000000001")
 
+    def test_blank_row_index_does_not_use_business_number(self) -> None:
+        with TemporaryDirectory() as tmp_dir:
+            input_path = Path(tmp_dir) / "input.xlsx"
+            pd.DataFrame(
+                [
+                    {
+                        "연번(선택)": "1",
+                        "사업자등록번호": "1111111111",
+                        "수출액 규모(필수: 내수/초보/유망/성장/선도 중 1개)": "내수",
+                        "해당 품목 수출 경험(필수: O/X)": "X",
+                        "HSCODE 6단위": "330499",
+                        "수출품명(선택: 구체적으로 작성 권장)": "스킨케어",
+                        "희망진출국가(직접분석: 기본 2개, 추천연동: 설정값만큼 입력 가능)": "베트남",
+                    },
+                    {
+                        "연번(선택)": "",
+                        "사업자등록번호": "123125989",
+                        "수출액 규모(필수: 내수/초보/유망/성장/선도 중 1개)": "초보",
+                        "해당 품목 수출 경험(필수: O/X)": "O",
+                        "HSCODE 6단위": "220600",
+                        "수출품명(선택: 구체적으로 작성 권장)": "전통 쌀 발효주(막걸리)",
+                        "희망진출국가(직접분석: 기본 2개, 추천연동: 설정값만큼 입력 가능)": "중국",
+                    },
+                ]
+            ).to_excel(input_path, index=False)
+
+            rows = read_input_excel(input_path)
+
+        self.assertEqual(rows[0]["row_index"], 1)
+        self.assertEqual(rows[1]["row_index"], 2)
+        self.assertEqual(rows[1]["business_number"], "123125989")
+
     def test_splits_country_values(self) -> None:
         self.assertEqual(split_country_values("베트남, 미국/일본\n베트남"), ["베트남", "미국", "일본"])
 

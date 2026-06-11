@@ -94,7 +94,6 @@ SOURCE_COLUMN_ALIASES = {
         "연번",
         "연번(선택)",
         "순번",
-        "번호",
         "NO",
         "No",
         "no",
