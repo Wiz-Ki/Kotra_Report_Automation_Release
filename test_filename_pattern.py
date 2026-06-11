@@ -4,10 +4,13 @@ import unittest
 from datetime import datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
+import automation
 import pandas as pd
 
 from automation import (
+    STATUS_RETRY_PENDING,
     STATUS_SUCCESS,
     TASK_TYPE_DIRECT,
     TASK_TYPE_RECOMMEND,
@@ -293,6 +296,76 @@ class FilenamePatternTest(unittest.TestCase):
             other_excluded_row = {**row, "excluded_countries": "일본"}
             self.assertIsNone(completed_report_task(log_dir, other_excluded_row, TASK_TYPE_RECOMMEND))
             self.assertIsNotNone(completed_report_task(log_dir, row, TASK_TYPE_RECOMMEND))
+
+    def test_recommend_link_continues_remaining_direct_country_after_failure(self) -> None:
+        class FakePage:
+            def is_closed(self) -> bool:
+                return False
+
+        with TemporaryDirectory() as tmp_dir:
+            log_dir = Path(tmp_dir) / "logs"
+            save_dir = Path(tmp_dir) / "downloads"
+            save_dir.mkdir()
+            recommendation_file = Path(tmp_dir) / "추천.pdf"
+            recommendation_file.write_text("pdf", encoding="utf-8")
+            row = {
+                "report_mode": "recommend",
+                "recommend_then_direct": True,
+                "direct_report_count": 2,
+                "row_index": 2,
+                "hs_code": "220600",
+                "product_name": "전통 쌀 발효주(막걸리)",
+                "target_country": "중국, 미국",
+                "excluded_countries": "",
+                "recommended_countries": "",
+                "final_target_countries": "중국, 미국",
+                "use_task_resume": True,
+            }
+            update_report_task_status(
+                log_dir,
+                row,
+                TASK_TYPE_RECOMMEND,
+                "",
+                STATUS_SUCCESS,
+                saved_file=recommendation_file,
+            )
+
+            def fake_process_direct_country_report(_page, _row, country, *_args, **_kwargs):
+                if country == "중국":
+                    raise RuntimeError("서버 오류")
+                path = save_dir / f"{country}.pdf"
+                path.write_text("pdf", encoding="utf-8")
+                return path
+
+            with patch.object(automation, "reset_for_next_row"), patch.object(
+                automation,
+                "process_direct_country_report",
+                side_effect=fake_process_direct_country_report,
+            ):
+                with self.assertRaisesRegex(RuntimeError, "중국"):
+                    automation.process_recommendation_row(
+                        FakePage(),
+                        row,
+                        save_dir,
+                        log_dir,
+                        [],
+                        timeout_ms=1,
+                        retry_count=0,
+                        status_callback=None,
+                        force_stop_requested=None,
+                        filename_pattern="",
+                        direct_report_count=2,
+                        defer_country_failures_for_retry=True,
+                    )
+
+            task_rows = read_report_task_rows(report_tasks_path(log_dir))
+            statuses = {
+                (item["task_type"], item["country"]): item["status"]
+                for item in task_rows
+            }
+
+        self.assertEqual(statuses[(TASK_TYPE_DIRECT, "중국")], STATUS_RETRY_PENDING)
+        self.assertEqual(statuses[(TASK_TYPE_DIRECT, "미국")], STATUS_SUCCESS)
 
     def test_failed_rows_restore_report_mode_options(self) -> None:
         with TemporaryDirectory() as tmp_dir:

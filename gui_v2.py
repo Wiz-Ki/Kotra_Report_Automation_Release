@@ -423,6 +423,7 @@ class KotraReportAppV2(ctk.CTk):
         self._build_options_panel(page)
         self._build_action_panel(page)
         self._build_execution_board(page)
+        self.after_idle(self._bind_page_mousewheel)
 
     def _build_header(self, parent: ctk.CTkFrame) -> None:
         header = ctk.CTkFrame(parent, fg_color="transparent")
@@ -1331,26 +1332,109 @@ class KotraReportAppV2(ctk.CTk):
         except tk.TclError:
             return False
 
+    def _wheel_scroll_units(self, event: tk.Event) -> int:
+        if getattr(event, "num", None) == 4:
+            return -3
+        if getattr(event, "num", None) == 5:
+            return 3
+        delta = int(getattr(event, "delta", 0) or 0)
+        if delta == 0:
+            return 0
+        if sys.platform == "darwin":
+            return -delta
+        return -int(delta / 120) * 3
+
+    def _canvas_can_scroll(self, canvas: tk.Canvas, units: int) -> bool:
+        if units == 0:
+            return False
+        try:
+            top, bottom = canvas.yview()
+        except tk.TclError:
+            return False
+        if units < 0:
+            return top > 0.001
+        return bottom < 0.999
+
+    def _scroll_page_canvas(self, units: int) -> None:
+        page_canvas = getattr(self._page_frame, "_parent_canvas", None)
+        if page_canvas is None or units == 0:
+            return
+        try:
+            if self._canvas_can_scroll(page_canvas, units):
+                page_canvas.yview_scroll(units, "units")
+        except tk.TclError:
+            pass
+
+    def _scroll_page_from_event(self, event: tk.Event) -> str:
+        units = self._wheel_scroll_units(event)
+        if units:
+            self._scroll_page_canvas(units)
+        return "break"
+
+    def _is_descendant_of_any(self, widget: tk.Widget, roots: list[tk.Widget]) -> bool:
+        current: tk.Widget | None = widget
+        while current is not None:
+            if current in roots:
+                return True
+            current = getattr(current, "master", None)
+        return False
+
+    def _nested_scroll_roots(self) -> list[tk.Widget]:
+        roots: list[tk.Widget] = []
+        if self._progress_body is not None:
+            roots.append(self._progress_body)
+            for attr in ("_parent_canvas", "_parent_frame", "_scrollbar"):
+                widget = getattr(self._progress_body, attr, None)
+                if widget is not None:
+                    roots.append(widget)
+        if self.log_text is not None:
+            roots.append(self.log_text)
+            for attr in ("_textbox", "_canvas", "_y_scrollbar"):
+                widget = getattr(self.log_text, attr, None)
+                if widget is not None:
+                    roots.append(widget)
+        return roots
+
+    def _bind_page_mousewheel(self) -> None:
+        page = self._page_frame
+        if page is None:
+            return
+        nested_roots = self._nested_scroll_roots()
+
+        def bind_recursive(widget: tk.Widget) -> None:
+            if self._is_descendant_of_any(widget, nested_roots):
+                return
+            widget.bind("<MouseWheel>", self._scroll_page_from_event, add="+")
+            widget.bind("<Button-4>", self._scroll_page_from_event, add="+")
+            widget.bind("<Button-5>", self._scroll_page_from_event, add="+")
+            for child in widget.winfo_children():
+                bind_recursive(child)
+
+        bind_recursive(page)
+        page_canvas = getattr(page, "_parent_canvas", None)
+        if page_canvas is not None:
+            page_canvas.bind("<MouseWheel>", self._scroll_page_from_event, add="+")
+            page_canvas.bind("<Button-4>", self._scroll_page_from_event, add="+")
+            page_canvas.bind("<Button-5>", self._scroll_page_from_event, add="+")
+
     def _scroll_progress_canvas(self, event: tk.Event) -> str:
         body_canvas = getattr(self._progress_body, "_parent_canvas", None)
         if body_canvas is None:
+            return "break"
+        units = self._wheel_scroll_units(event)
+        if units == 0:
             return "break"
         # 내용이 모두 보이면 스크롤하지 않는다. scrollregion 이 캔버스보다 작은 상태에서
         # yview_scroll 을 호출하면 경계 클램프가 되지 않아 행들이 위/아래로 끌려가
         # 테이블 상단에 빈 공간이 생기는 버그가 있다.
         if not self._progress_scroll_needed():
+            self._scroll_page_canvas(units)
+            return "break"
+        if not self._canvas_can_scroll(body_canvas, units):
+            self._scroll_page_canvas(units)
             return "break"
         try:
-            if getattr(event, "num", None) == 4:
-                body_canvas.yview_scroll(-3, "units")
-            elif getattr(event, "num", None) == 5:
-                body_canvas.yview_scroll(3, "units")
-            elif not event.delta:
-                return "break"
-            elif sys.platform == "darwin":
-                body_canvas.yview_scroll(-int(event.delta), "units")
-            else:
-                body_canvas.yview_scroll(-int(event.delta / 120) * 3, "units")
+            body_canvas.yview_scroll(units, "units")
         except tk.TclError:
             pass
         return "break"
@@ -1374,6 +1458,7 @@ class KotraReportAppV2(ctk.CTk):
         "toggle10b": dict(size=10, weight="bold"),
         "mono12": dict(family="Consolas", size=12),
         "glyph11": dict(size=11),
+        "glyph14b": dict(size=14, weight="bold"),
         "pill12b": dict(size=12, weight="bold"),
     }
 
@@ -1432,8 +1517,8 @@ class KotraReportAppV2(ctk.CTk):
         file_button = ctk.CTkButton(
             frame,
             text="—",
-            font=self._table_font("body12"),
-            width=46,
+            font=self._table_font("glyph14b"),
+            width=30,
             height=26,
             fg_color="transparent",
             hover_color=COLORS["surface_alt"],
@@ -1507,8 +1592,8 @@ class KotraReportAppV2(ctk.CTk):
         file_button = ctk.CTkButton(
             frame,
             text="—",
-            font=self._table_font("body12"),
-            width=46,
+            font=self._table_font("glyph14b"),
+            width=30,
             height=24,
             fg_color="transparent",
             hover_color=COLORS["surface_alt"],
@@ -1664,6 +1749,7 @@ class KotraReportAppV2(ctk.CTk):
             button.configure(
                 text="—",
                 state="disabled",
+                width=30,
                 fg_color="transparent",
                 border_width=0,
                 text_color=COLORS["muted"],
@@ -1673,8 +1759,9 @@ class KotraReportAppV2(ctk.CTk):
 
         target = paths[0] if len(paths) == 1 else paths[0].parent
         button.configure(
-            text="열기",
+            text="↗",
             state="normal",
+            width=30,
             fg_color=COLORS["surface"],
             hover_color="#edf2f7",
             border_width=1,
@@ -1850,19 +1937,20 @@ class KotraReportAppV2(ctk.CTk):
         if self.log_text is None:
             return "break"
 
-        if getattr(event, "num", None) == 4:
-            step = -3
-        elif getattr(event, "num", None) == 5:
-            step = 3
-        elif event.delta == 0:
+        step = self._wheel_scroll_units(event)
+        if step == 0:
             return "break"
-        elif sys.platform == "darwin":
-            step = -event.delta
-        else:
-            step = -int(event.delta / 120) * 3
 
-        if step != 0:
+        try:
+            top, bottom = self.log_text.yview()
+            can_scroll_log = top > 0.001 if step < 0 else bottom < 0.999
+        except tk.TclError:
+            can_scroll_log = False
+
+        if can_scroll_log:
             self.log_text.yview_scroll(step, "units")
+        else:
+            self._scroll_page_canvas(step)
         return "break"
 
     def _on_filename_custom_toggled(self) -> None:

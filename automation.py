@@ -236,6 +236,48 @@ def launch_browser(playwright: Any, headless: bool, status_callback: StatusCallb
             ) from chromium_exc
 
 
+def browser_is_closed(browser: Any) -> bool:
+    try:
+        return bool(browser.is_connected and not browser.is_connected())
+    except Exception:
+        return True
+
+
+def page_is_closed(page: Any) -> bool:
+    try:
+        return bool(page.is_closed())
+    except Exception:
+        return True
+
+
+def close_browser_context(context: Any | None, browser: Any | None) -> None:
+    for item in (context, browser):
+        if item is None:
+            continue
+        try:
+            item.close()
+        except Exception:
+            pass
+
+
+def create_context_page(
+    browser: Any,
+    *,
+    use_storage_state: bool,
+    state_path: Path,
+) -> tuple[Any, Page, list[str]]:
+    context_kwargs: dict[str, Any] = {"accept_downloads": True}
+    if use_storage_state and state_path.exists():
+        context_kwargs["storage_state"] = str(state_path)
+
+    context = browser.new_context(**context_kwargs)
+    page = context.new_page()
+    page.set_default_navigation_timeout(PAGE_LOAD_TIMEOUT_MS)
+    page.set_default_timeout(ELEMENT_TIMEOUT_MS)
+    diagnostic_events = setup_page_diagnostics(page)
+    return context, page, diagnostic_events
+
+
 def write_startup_error(log_dir: str | Path, message: str) -> Path:
     path = Path(log_dir) / "startup_error.txt"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -724,7 +766,7 @@ def save_failure_artifacts(
         f"target_country: {row_data.get('target_country', '')}",
         f"excluded_countries: {row_data.get('excluded_countries', '')}",
         f"report_mode: {row_data.get('report_mode', '')}",
-        f"url: {page.url}",
+        f"url: {safe_page_url(page)}",
         f"error_message: {error_message}",
         "",
         "=== Recent Browser Events ===",
@@ -735,6 +777,28 @@ def save_failure_artifacts(
     ]
     text_path.write_text("\n".join(content), encoding="utf-8")
     return f"{text_path} / {screenshot_path}"
+
+
+def safe_page_url(page: Page) -> str:
+    try:
+        return str(page.url)
+    except Exception as exc:
+        return f"(url unavailable: {exc})"
+
+
+def is_closed_browser_error(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return (
+        "target page, context or browser has been closed" in text
+        or "browser has been closed" in text
+        or "page has been closed" in text
+        or "context has been closed" in text
+    )
+
+
+def summarize_country_failures(failures: list[tuple[str, Exception]]) -> RuntimeError:
+    summary = "; ".join(f"{country}: {exc}" for country, exc in failures)
+    return RuntimeError(f"일부 국가 보고서 생성에 실패했습니다: {summary}")
 
 
 def download_report(
@@ -986,6 +1050,7 @@ def process_row(
     filename_pattern: str = "",
     direct_report_count: int = DEFAULT_DIRECT_REPORT_COUNT,
     task_status_callback: TaskStatusCallback | None = None,
+    defer_country_failures_for_retry: bool = False,
 ) -> RowProcessResult:
     report_mode = normalize_report_mode(row_data.get("report_mode", REPORT_MODE_DIRECT))
     direct_report_count = normalize_direct_report_count(row_data.get("direct_report_count", direct_report_count))
@@ -1003,6 +1068,7 @@ def process_row(
             filename_pattern,
             direct_report_count,
             task_status_callback,
+            defer_country_failures_for_retry,
         )
 
     return process_direct_row(
@@ -1018,6 +1084,7 @@ def process_row(
         filename_pattern,
         direct_report_count,
         task_status_callback,
+        defer_country_failures_for_retry,
     )
 
 
@@ -1034,6 +1101,7 @@ def process_direct_row(
     filename_pattern: str,
     direct_report_count: int,
     task_status_callback: TaskStatusCallback | None = None,
+    defer_country_failures_for_retry: bool = False,
 ) -> RowProcessResult:
     direct_report_count = normalize_direct_report_count(direct_report_count)
     target_countries = split_country_values(row_data.get("target_country", ""))[:direct_report_count]
@@ -1057,6 +1125,7 @@ def process_direct_row(
         emit_task_status(country, STATUS_PENDING)
 
     direct_report_files: list[Path] = []
+    country_failures: list[tuple[str, Exception]] = []
     for index, country in enumerate(target_countries):
         completed_task = completed_report_task(log_dir, row_data, TASK_TYPE_DIRECT, country)
         if completed_task is not None:
@@ -1068,11 +1137,11 @@ def process_direct_row(
             emit_task_status(country, STATUS_SUCCESS, [saved_file])
             continue
 
-        if index > 0:
-            reset_for_next_row(page)
         update_report_task_status(log_dir, row_data, TASK_TYPE_DIRECT, country, STATUS_RUNNING)
         emit_task_status(country, STATUS_RUNNING)
         try:
+            if index > 0:
+                reset_for_next_row(page)
             saved_direct_report = process_direct_country_report(
                 page,
                 row_data,
@@ -1087,15 +1156,26 @@ def process_direct_row(
                 filename_pattern,
             )
         except Exception as exc:
-            update_report_task_status(log_dir, row_data, TASK_TYPE_DIRECT, country, STATUS_FAILED, error_message=str(exc))
-            emit_task_status(country, STATUS_FAILED)
-            raise
+            if page_is_closed(page) or is_closed_browser_error(exc):
+                update_report_task_status(log_dir, row_data, TASK_TYPE_DIRECT, country, STATUS_FAILED, error_message=str(exc))
+                emit_task_status(country, STATUS_FAILED)
+                raise
+            failed_status = STATUS_RETRY_PENDING if defer_country_failures_for_retry else STATUS_FAILED
+            update_report_task_status(log_dir, row_data, TASK_TYPE_DIRECT, country, failed_status, error_message=str(exc))
+            emit_task_status(country, failed_status)
+            country_failures.append((country, exc))
+            if status_callback:
+                next_action = "남은 국가 처리 후 자동 재시도합니다" if defer_country_failures_for_retry else "남은 국가를 계속 처리합니다"
+                status_callback(f"{country} 보고서 생성 실패, {next_action}: {exc}")
+            continue
         direct_report_files.append(saved_direct_report)
         row_data["direct_report_files"] = join_path_values(direct_report_files)
         update_report_task_status(log_dir, row_data, TASK_TYPE_DIRECT, country, STATUS_SUCCESS, saved_file=saved_direct_report)
         emit_task_status(country, STATUS_SUCCESS, [saved_direct_report])
 
     row_data["final_target_countries"] = join_country_values(target_countries)
+    if country_failures:
+        raise summarize_country_failures(country_failures)
     return RowProcessResult(
         saved_files=direct_report_files,
         direct_report_files=direct_report_files,
@@ -1116,6 +1196,7 @@ def process_recommendation_row(
     filename_pattern: str,
     direct_report_count: int,
     task_status_callback: TaskStatusCallback | None = None,
+    defer_country_failures_for_retry: bool = False,
 ) -> RowProcessResult:
     direct_report_count = normalize_direct_report_count(direct_report_count)
     recommend_then_direct = truthy(row_data.get("recommend_then_direct", False))
@@ -1206,6 +1287,7 @@ def process_recommendation_row(
         emit_task_status(TASK_TYPE_DIRECT, country, STATUS_PENDING)
 
     direct_report_files: list[Path] = []
+    country_failures: list[tuple[str, Exception]] = []
     for country in final_targets:
         completed_direct_task = completed_report_task(log_dir, row_data, TASK_TYPE_DIRECT, country)
         if completed_direct_task is not None:
@@ -1217,10 +1299,10 @@ def process_recommendation_row(
             emit_task_status(TASK_TYPE_DIRECT, country, STATUS_SUCCESS, [saved_file])
             continue
 
-        reset_for_next_row(page)
         update_report_task_status(log_dir, row_data, TASK_TYPE_DIRECT, country, STATUS_RUNNING)
         emit_task_status(TASK_TYPE_DIRECT, country, STATUS_RUNNING)
         try:
+            reset_for_next_row(page)
             saved_direct_report = process_direct_country_report(
                 page,
                 row_data,
@@ -1235,14 +1317,25 @@ def process_recommendation_row(
                 filename_pattern,
             )
         except Exception as exc:
-            update_report_task_status(log_dir, row_data, TASK_TYPE_DIRECT, country, STATUS_FAILED, error_message=str(exc))
-            emit_task_status(TASK_TYPE_DIRECT, country, STATUS_FAILED)
-            raise
+            if page_is_closed(page) or is_closed_browser_error(exc):
+                update_report_task_status(log_dir, row_data, TASK_TYPE_DIRECT, country, STATUS_FAILED, error_message=str(exc))
+                emit_task_status(TASK_TYPE_DIRECT, country, STATUS_FAILED)
+                raise
+            failed_status = STATUS_RETRY_PENDING if defer_country_failures_for_retry else STATUS_FAILED
+            update_report_task_status(log_dir, row_data, TASK_TYPE_DIRECT, country, failed_status, error_message=str(exc))
+            emit_task_status(TASK_TYPE_DIRECT, country, failed_status)
+            country_failures.append((country, exc))
+            if status_callback:
+                next_action = "남은 국가 처리 후 자동 재시도합니다" if defer_country_failures_for_retry else "남은 국가를 계속 처리합니다"
+                status_callback(f"{country} 보고서 생성 실패, {next_action}: {exc}")
+            continue
         direct_report_files.append(saved_direct_report)
         row_data["direct_report_files"] = join_path_values(direct_report_files)
         update_report_task_status(log_dir, row_data, TASK_TYPE_DIRECT, country, STATUS_SUCCESS, saved_file=saved_direct_report)
         emit_task_status(TASK_TYPE_DIRECT, country, STATUS_SUCCESS, [saved_direct_report])
 
+    if country_failures:
+        raise summarize_country_failures(country_failures)
     return RowProcessResult(
         saved_files=[recommendation_report, *direct_report_files],
         recommendation_report_file=recommendation_report,
@@ -1731,9 +1824,12 @@ def run_parallel_automation(
             active_workers -= 1
             should_save = save_storage_state and not storage_state_saved and active_workers == 0
             if should_save:
-                context.storage_state(path=str(state_path))
-                storage_state_saved = True
-                emit_status(f"[세션 {session_id}] 브라우저 세션을 저장했습니다: {state_path}")
+                try:
+                    context.storage_state(path=str(state_path))
+                    storage_state_saved = True
+                    emit_status(f"[세션 {session_id}] 브라우저 세션을 저장했습니다: {state_path}")
+                except Exception as exc:
+                    emit_status(f"[세션 {session_id}] 브라우저 세션 저장을 건너뜁니다: {exc}")
 
     def finish_worker_without_context() -> None:
         nonlocal active_workers
@@ -1781,15 +1877,34 @@ def run_parallel_automation(
                 emit_status(f"[세션 {session_id}] 브라우저 시작 오류를 기록했습니다: {error_path}")
                 raise
 
-            context_kwargs: dict[str, Any] = {"accept_downloads": True}
-            if use_storage_state and state_path.exists():
-                context_kwargs["storage_state"] = str(state_path)
+            context, page, diagnostic_events = create_context_page(
+                browser,
+                use_storage_state=use_storage_state,
+                state_path=state_path,
+            )
 
-            context = browser.new_context(**context_kwargs)
-            page = context.new_page()
-            page.set_default_navigation_timeout(PAGE_LOAD_TIMEOUT_MS)
-            page.set_default_timeout(ELEMENT_TIMEOUT_MS)
-            diagnostic_events = setup_page_diagnostics(page)
+            def recover_worker_page(reason: str) -> None:
+                nonlocal browser, context, page, diagnostic_events
+                emit_status(f"[세션 {session_id}] 브라우저 세션을 복구합니다: {reason}")
+                close_browser_context(context, None)
+                if browser_is_closed(browser):
+                    close_browser_context(None, browser)
+                    browser = launch_browser(
+                        playwright,
+                        headless,
+                        lambda message: emit_status(f"[세션 {session_id}] {message}"),
+                    )
+                context, page, diagnostic_events = create_context_page(
+                    browser,
+                    use_storage_state=use_storage_state,
+                    state_path=state_path,
+                )
+                open_site(page)
+                ensure_initial_form(
+                    page,
+                    lambda message: emit_status(f"[세션 {session_id}] {message}"),
+                    wait_seconds=PARALLEL_INITIAL_FORM_WAIT_SECONDS,
+                )
 
             try:
                 emit_status(f"[세션 {session_id}] KOTRA 보고서 생성 페이지에 접속합니다.")
@@ -1838,6 +1953,11 @@ def run_parallel_automation(
                         with file_lock:
                             update_processing_status(input_excel_path, log_dir, row_data, STATUS_RUNNING)
                         emit_row_status(row_data, STATUS_RUNNING)
+                        row_can_retry_after_failure = (
+                            row_attempt < row_retry_count
+                            and is_retry_enabled(auto_retry_enabled)
+                            and not should_stop_before_next_row()
+                        )
 
                         row_result = process_row(
                             page,
@@ -1857,6 +1977,7 @@ def run_parallel_automation(
                             filename_pattern=filename_pattern,
                             direct_report_count=direct_report_count,
                             task_status_callback=task_status_callback,
+                            defer_country_failures_for_retry=row_can_retry_after_failure,
                         )
                         saved_files_text = row_result.saved_files_text()
                         with file_lock:
@@ -1918,22 +2039,19 @@ def run_parallel_automation(
                         emit_progress(f"{prefix} 다음 행 준비 중")
                         if should_requeue or next_retry_item is not None or (not should_stop_before_next_row() and not row_queue.empty()):
                             try:
-                                reset_for_next_row(page)
+                                if page_is_closed(page) or browser_is_closed(browser):
+                                    recover_worker_page("브라우저 또는 페이지가 닫혔습니다.")
+                                else:
+                                    reset_for_next_row(page)
                             except Exception as exc:
                                 emit_status(f"[세션 {session_id}] 다음 행 준비 중 페이지 초기화 실패, 새로 접속합니다: {exc}")
-                                open_site(page)
-                                ensure_initial_form(
-                                    page,
-                                    lambda message: emit_status(f"[세션 {session_id}] {message}"),
-                                    wait_seconds=PARALLEL_INITIAL_FORM_WAIT_SECONDS,
-                                )
+                                recover_worker_page(str(exc))
 
             finally:
                 try:
                     finish_worker(context, session_id)
                 finally:
-                    context.close()
-                    browser.close()
+                    close_browser_context(context, browser)
 
     worker_errors: list[str] = []
     with ThreadPoolExecutor(max_workers=worker_count) as executor:
@@ -2147,16 +2265,26 @@ def run_automation(
             emit_status(f"브라우저 시작 오류를 기록했습니다: {error_path}")
             raise
 
-        context_kwargs: dict[str, Any] = {"accept_downloads": True}
+        context, page, diagnostic_events = create_context_page(
+            browser,
+            use_storage_state=use_storage_state,
+            state_path=state_path,
+        )
 
-        if use_storage_state and state_path.exists():
-            context_kwargs["storage_state"] = str(state_path)
-
-        context = browser.new_context(**context_kwargs)
-        page = context.new_page()
-        page.set_default_navigation_timeout(PAGE_LOAD_TIMEOUT_MS)
-        page.set_default_timeout(ELEMENT_TIMEOUT_MS)
-        diagnostic_events = setup_page_diagnostics(page)
+        def recover_page(reason: str) -> None:
+            nonlocal browser, context, page, diagnostic_events
+            emit_status(f"브라우저 세션을 복구합니다: {reason}")
+            close_browser_context(context, None)
+            if browser_is_closed(browser):
+                close_browser_context(None, browser)
+                browser = launch_browser(playwright, headless, emit_status)
+            context, page, diagnostic_events = create_context_page(
+                browser,
+                use_storage_state=use_storage_state,
+                state_path=state_path,
+            )
+            open_site(page)
+            ensure_initial_form(page, emit_status)
 
         try:
             emit_status("KOTRA 보고서 생성 페이지에 접속합니다.")
@@ -2211,6 +2339,12 @@ def run_automation(
                 emit_row_status(row_data, STATUS_RUNNING)
 
                 try:
+                    row_can_retry_after_failure = (
+                        row_attempt < row_retry_count
+                        and is_retry_enabled(auto_retry_enabled)
+                        and not (stop_requested and stop_requested())
+                        and not (force_stop_requested and force_stop_requested())
+                    )
                     row_result = process_row(
                         page,
                         row_data,
@@ -2224,6 +2358,7 @@ def run_automation(
                         filename_pattern=filename_pattern,
                         direct_report_count=direct_report_count,
                         task_status_callback=task_status_callback,
+                        defer_country_failures_for_retry=row_can_retry_after_failure,
                     )
                     saved_files_text = row_result.saved_files_text()
                     log_success_row(row_data, saved_files_text, log_dir)
@@ -2294,20 +2429,24 @@ def run_automation(
                     and not (force_stop_requested and force_stop_requested())
                 ):
                     try:
-                        reset_for_next_row(page)
+                        if page_is_closed(page) or browser_is_closed(browser):
+                            recover_page("브라우저 또는 페이지가 닫혔습니다.")
+                        else:
+                            reset_for_next_row(page)
                     except Exception as exc:
                         emit_status(f"다음 행 준비 중 페이지 초기화 실패, 새로 접속합니다: {exc}")
-                        open_site(page)
-                        ensure_initial_form(page, emit_status)
+                        recover_page(str(exc))
 
             emit_progress(last_progress_index, "완료")
 
             if save_storage_state:
-                context.storage_state(path=str(state_path))
+                try:
+                    context.storage_state(path=str(state_path))
+                except Exception as exc:
+                    emit_status(f"브라우저 세션 저장을 건너뜁니다: {exc}")
 
         finally:
-            context.close()
-            browser.close()
+            close_browser_context(context, browser)
 
     stopped = bool(stop_requested and stop_requested()) or bool(force_stop_requested and force_stop_requested())
     return {
