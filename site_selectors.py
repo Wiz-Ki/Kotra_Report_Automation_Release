@@ -26,8 +26,9 @@ SELECTORS = {
     "generate_button": "button:has-text('보고서 생성')",
     "download_button": "button:has-text('PDF 저장')",
     "download_button_fallback": "button:has-text('다운로드')",
-    "retry_button": "button:has-text('다시 시도하기')",
+    # 문구가 충분히 고유한 상태 전환 버튼은 button 외 구현(a, role=button)도 허용한다.
+    "retry_button": "button:has-text('다시 시도하기'), a:has-text('다시 시도하기'), [role='button']:has-text('다시 시도하기')",
     "streaming_error_text": "text=Unexpected server Streaming error occurred",
     "reset_button": "button:has-text('초기화')",
-    "new_analysis_button": "button:has-text('새로운 분석 시작하기')",
+    "new_analysis_button": "button:has-text('새로운 분석 시작하기'), a:has-text('새로운 분석 시작하기'), [role='button']:has-text('새로운 분석 시작하기')",
 }

@@ -134,6 +134,13 @@ PARALLEL_SESSION_START_DELAY_SECONDS = 3
 DEFAULT_INITIAL_FORM_WAIT_SECONDS = 10
 PARALLEL_INITIAL_FORM_WAIT_SECONDS = 15
 GENERATION_STATUS_POLL_INTERVAL_MS = 3_000
+# 보고서 생성 스트리밍 API 경로. 이 경로의 POST가 끊기면 생성이 죽은 것으로 본다.
+GENERATION_API_URL_MARKER = "/api/export-assistant/"
+# 생성 요청 중단 감지 후, 사이트가 인식 가능한 화면(초기화면/오류/중단)으로 전환되길 기다리는 유예시간.
+GENERATION_ABORT_GRACE_SECONDS = 30
+# 페이지 전체 텍스트가 이 시간 동안 전혀 변하지 않으면 생성이 멈춘 것으로 판정한다.
+GENERATION_STALL_SECONDS = 240
+SCREENSHOT_TIMEOUT_MS = 15_000
 FILENAME_PATTERN_TOKEN_LABELS = [
     ("연번", "row_index"),
     ("회사명", "company_name"),
@@ -276,6 +283,7 @@ def create_context_page(
     page.set_default_navigation_timeout(PAGE_LOAD_TIMEOUT_MS)
     page.set_default_timeout(ELEMENT_TIMEOUT_MS)
     diagnostic_events = setup_page_diagnostics(page)
+    ensure_generation_failure_recorder(page)
     return context, page, diagnostic_events
 
 
@@ -607,10 +615,8 @@ def click_right_of_locator(page: Page, locator) -> None:
 
 
 def click_generate_button(page: Page) -> None:
-    button = page.locator(SELECTORS["generate_button"]).first
-    button.wait_for(state="visible", timeout=ELEMENT_TIMEOUT_MS)
+    button = wait_for_first_visible(page, SELECTORS["generate_button"], ELEMENT_TIMEOUT_MS)
     button.scroll_into_view_if_needed()
-    button.wait_for(state="attached", timeout=ELEMENT_TIMEOUT_MS)
     try:
         wait_until_enabled(page, button, ELEMENT_TIMEOUT_MS)
     except PlaywrightTimeoutError as exc:
@@ -635,25 +641,68 @@ def wait_until_enabled(page: Page, locator, timeout_ms: int) -> None:
     )
 
 
-def download_button_locators(page: Page):
-    locators = [page.locator(SELECTORS["download_button"]).first]
+def download_button_selectors() -> list[str]:
+    selectors = [SELECTORS["download_button"]]
     fallback_selector = SELECTORS.get("download_button_fallback")
     if fallback_selector:
-        locators.append(page.locator(fallback_selector).first)
-    return locators
+        selectors.append(fallback_selector)
+    return selectors
 
 
 def wait_for_download_button(page: Page, timeout_ms: int = TIMEOUT_MS):
     deadline = datetime.now().timestamp() + timeout_ms / 1000
-    candidates = download_button_locators(page)
+    candidates = download_button_selectors()
 
     while datetime.now().timestamp() < deadline:
-        for candidate in candidates:
-            if is_visible(candidate):
+        for selector in candidates:
+            candidate = first_visible_locator(page, selector)
+            if candidate is not None:
                 return candidate
         page.wait_for_timeout(500)
 
     raise PlaywrightTimeoutError(f"다운로드 버튼이 {timeout_ms // 1000}초 안에 나타나지 않았습니다.")
+
+
+def ensure_generation_failure_recorder(page: Page) -> list[tuple[float, str]]:
+    """
+    생성 스트리밍 API(POST)의 실패 이벤트를 페이지 수명 동안 상시 기록한다.
+
+    대기 루프 진입 후에 리스너를 달면 '생성 클릭 직후~대기 시작 사이'에 끊긴
+    요청을 놓치므로, 페이지 생성 시점에 한 번만 붙여서 (시각, 내용)으로 쌓아둔다.
+    """
+    recorder = getattr(page, "_generation_request_failures", None)
+    if recorder is not None:
+        return recorder
+
+    recorder = []
+
+    def on_request_failed(request) -> None:
+        try:
+            if request.method == "POST" and GENERATION_API_URL_MARKER in request.url:
+                failure = getattr(request, "failure", None) or "원인 미상"
+                recorder.append((time.time(), f"{request.method} {request.url} - {failure}"))
+                if len(recorder) > 50:
+                    del recorder[:25]
+        except Exception:
+            pass
+
+    page.on("requestfailed", on_request_failed)
+    setattr(page, "_generation_request_failures", recorder)
+    return recorder
+
+
+def page_text_signature(page: Page) -> str | None:
+    """
+    스톨 감지용 페이지 텍스트 지문. 실패하면 None(판정 보류).
+    """
+    try:
+        return page.evaluate(
+            "() => { const t = document.body ? document.body.textContent : '';"
+            " let h = 0; for (let i = 0; i < t.length; i++) { h = (h * 31 + t.charCodeAt(i)) | 0; }"
+            " return t.length + ':' + h; }"
+        )
+    except Exception:
+        return None
 
 
 def wait_for_download_or_generation_error(
@@ -665,11 +714,19 @@ def wait_for_download_or_generation_error(
     deadline = datetime.now().timestamp() + timeout_ms / 1000
     started_at = datetime.now().timestamp()
     last_status_at = 0.0
-    download_buttons = download_button_locators(page)
-    retry_button = page.locator(SELECTORS["retry_button"]).first
-    error_text = page.locator(SELECTORS["streaming_error_text"]).first
-    generate_button = page.locator(SELECTORS["generate_button"]).first
-    new_analysis_button = page.locator(SELECTORS["new_analysis_button"]).first
+    download_selectors = download_button_selectors()
+
+    # 생성 스트리밍 POST가 끊기면(net::ERR_ABORTED 등) 화면만 봐서는 알 수 없으므로
+    # 페이지 상시 레코더에서 이번 생성(클릭 직후 포함, 2초 여유) 이후의 실패만 본다.
+    failure_recorder = ensure_generation_failure_recorder(page)
+    failure_window_start = started_at - 2.0
+
+    def recent_stream_failures() -> list[str]:
+        return [description for ts, description in list(failure_recorder) if ts >= failure_window_start]
+
+    stream_failed_at: float | None = None
+    stall_signature: str | None = None
+    stall_changed_at = started_at
 
     while datetime.now().timestamp() < deadline:
         check_force_stop(force_stop_requested)
@@ -679,23 +736,47 @@ def wait_for_download_or_generation_error(
             status_callback(f"보고서 생성 중입니다. 경과 {elapsed}초")
             last_status_at = now
 
-        for download_button in download_buttons:
-            if is_visible(download_button):
+        for selector in download_selectors:
+            download_button = first_visible_locator(page, selector)
+            if download_button is not None:
                 if status_callback:
                     status_callback("PDF 저장 버튼이 나타났습니다. 다운로드를 시작합니다.")
                 return "download", download_button
-        if is_visible(retry_button) or is_visible(error_text):
+        retry_button = first_visible_locator(page, SELECTORS["retry_button"])
+        if retry_button is not None or first_visible_locator(page, SELECTORS["streaming_error_text"]) is not None:
             if status_callback:
                 status_callback("KOTRA 서버 오류 화면이 감지되었습니다.")
             return "error", retry_button
-        if now - started_at > 5 and is_visible(new_analysis_button):
+        if now - started_at > 5:
+            new_analysis_button = first_visible_locator(page, SELECTORS["new_analysis_button"])
+            if new_analysis_button is not None:
+                if status_callback:
+                    status_callback("분석이 중단되어 새로운 분석 시작 상태가 감지되었습니다.")
+                return "analysis_stopped", new_analysis_button
+            generate_button = first_visible_locator(page, SELECTORS["generate_button"])
+            if generate_button is not None:
+                if status_callback:
+                    status_callback("초기 입력 화면으로 돌아온 상태가 감지되었습니다.")
+                return "returned_to_form", generate_button
+
+        stream_failures = recent_stream_failures()
+        if stream_failures and stream_failed_at is None:
+            stream_failed_at = now
             if status_callback:
-                status_callback("분석이 중단되어 새로운 분석 시작 상태가 감지되었습니다.")
-            return "analysis_stopped", new_analysis_button
-        if now - started_at > 5 and is_visible(generate_button):
-            if status_callback:
-                status_callback("초기 입력 화면으로 돌아온 상태가 감지되었습니다.")
-            return "returned_to_form", generate_button
+                status_callback(
+                    "보고서 생성 요청이 중단된 것이 감지되었습니다. "
+                    f"{GENERATION_ABORT_GRACE_SECONDS}초 동안 화면 전환을 기다립니다."
+                )
+        if stream_failed_at is not None and now - stream_failed_at >= GENERATION_ABORT_GRACE_SECONDS:
+            return "generation_aborted", "; ".join(stream_failures[-3:])
+
+        signature = page_text_signature(page)
+        if signature is None or signature != stall_signature:
+            stall_signature = signature
+            stall_changed_at = now
+        elif now - stall_changed_at >= GENERATION_STALL_SECONDS:
+            return "stalled", None
+
         page.wait_for_timeout(GENERATION_STATUS_POLL_INTERVAL_MS)
 
     raise PlaywrightTimeoutError(f"다운로드 버튼이 {timeout_ms // 1000}초 안에 나타나지 않았습니다.")
@@ -706,6 +787,39 @@ def is_visible(locator) -> bool:
         return locator.is_visible()
     except Exception:
         return False
+
+
+def first_visible_locator(page: Page, selector: str, *, limit: int = 8):
+    """
+    selector와 일치하는 요소 중 '화면에 보이는' 첫 요소를 반환한다. 없으면 None.
+
+    .first는 DOM 순서상 첫 요소에 고정되므로, 숨겨진 중복 노드(이전 화면 잔존
+    요소, 반응형 레이아웃 중복 등)가 앞에 있으면 보이는 요소를 영영 못 찾는다.
+    상태 감지는 반드시 이 함수로 '보이는 매치가 있는가'를 판정한다.
+    """
+    try:
+        locator = page.locator(selector)
+        count = min(locator.count(), limit)
+    except Exception:
+        return None
+    for index in range(count):
+        candidate = locator.nth(index)
+        if is_visible(candidate):
+            return candidate
+    return None
+
+
+def wait_for_first_visible(page: Page, selector: str, timeout_ms: int):
+    deadline = time.monotonic() + timeout_ms / 1000
+    while True:
+        candidate = first_visible_locator(page, selector)
+        if candidate is not None:
+            return candidate
+        if time.monotonic() >= deadline:
+            raise PlaywrightTimeoutError(
+                f"요소가 {timeout_ms // 1000}초 안에 화면에 나타나지 않았습니다: {selector}"
+            )
+        page.wait_for_timeout(250)
 
 
 def setup_page_diagnostics(page: Page) -> list[str]:
@@ -753,9 +867,16 @@ def save_failure_artifacts(
     text_path = diagnostics_dir / f"{base_name}.txt"
 
     try:
-        page.screenshot(path=str(screenshot_path), full_page=True)
+        page.screenshot(path=str(screenshot_path), full_page=True, timeout=SCREENSHOT_TIMEOUT_MS)
     except Exception as exc:
-        events.append(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] screenshot failed: {exc}")
+        events.append(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] full page screenshot failed: {exc}")
+        try:
+            # 전체 페이지 캡처가 폰트 로딩 등으로 매달리면 보이는 영역이라도 남긴다.
+            page.screenshot(path=str(screenshot_path), full_page=False, timeout=SCREENSHOT_TIMEOUT_MS)
+        except Exception as viewport_exc:
+            events.append(
+                f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] viewport screenshot failed: {viewport_exc}"
+            )
 
     page_text = ""
     try:
@@ -821,14 +942,24 @@ def download_report(
     if not (save_path.exists() and save_path.is_dir()):
         save_path.parent.mkdir(parents=True, exist_ok=True)
 
-    status, download_button = wait_for_download_or_generation_error(page, timeout_ms, status_callback, force_stop_requested)
+    status, payload = wait_for_download_or_generation_error(page, timeout_ms, status_callback, force_stop_requested)
     if status == "error":
         raise RuntimeError("KOTRA 보고서 생성 중 서버 스트리밍 오류가 발생했습니다.")
     if status == "returned_to_form":
         raise RuntimeError("보고서 생성 중 초기 입력 화면으로 돌아왔습니다. 서버 오류 또는 사용자의 되돌아가기 동작으로 판단됩니다.")
     if status == "analysis_stopped":
         raise RuntimeError("보고서 생성 중 분석이 중단되었습니다. 사용자가 분석 중단하기를 눌렀거나 사이트가 생성을 중단한 것으로 판단됩니다.")
+    if status == "generation_aborted":
+        detail = f" ({payload})" if payload else ""
+        raise RuntimeError(
+            f"보고서 생성 요청이 중단되었습니다. 서버가 생성을 취소했거나 네트워크가 끊긴 것으로 판단됩니다.{detail}"
+        )
+    if status == "stalled":
+        raise RuntimeError(
+            f"보고서 생성이 멈춘 것으로 판단됩니다. {GENERATION_STALL_SECONDS}초 동안 화면 변화가 없었습니다."
+        )
 
+    download_button = payload
     download_button.scroll_into_view_if_needed()
     wait_until_enabled(page, download_button, ELEMENT_TIMEOUT_MS)
     check_force_stop(force_stop_requested)
@@ -971,23 +1102,32 @@ def unique_file_path(path: Path) -> Path:
 
 
 def reset_for_next_row(page: Page) -> None:
-    new_analysis_button = page.locator(SELECTORS["new_analysis_button"]).first
-    if is_visible(new_analysis_button):
+    # 빈 입력 화면이면(직전 단계에서 이미 초기화됨) 그대로 사용한다.
+    # 값이 남아 있으면 이전 입력이 다음 보고서에 섞이지 않도록 초기화 경로를 끝까지 탄다.
+    hs_code_input = first_visible_locator(page, SELECTORS["hs_code_input"])
+    if hs_code_input is not None:
+        try:
+            if not hs_code_input.input_value(timeout=2_000).strip():
+                return
+        except Exception:
+            pass
+
+    new_analysis_button = first_visible_locator(page, SELECTORS["new_analysis_button"])
+    if new_analysis_button is not None:
         new_analysis_button.scroll_into_view_if_needed()
         wait_until_enabled(page, new_analysis_button, ELEMENT_TIMEOUT_MS)
         new_analysis_button.click()
-        page.locator(SELECTORS["hs_code_input"]).first.wait_for(state="visible", timeout=ELEMENT_TIMEOUT_MS)
+        wait_for_first_visible(page, SELECTORS["hs_code_input"], ELEMENT_TIMEOUT_MS)
         return
 
     try:
-        reset_button = page.locator(SELECTORS["reset_button"]).first
-        reset_button.wait_for(state="visible", timeout=5_000)
+        reset_button = wait_for_first_visible(page, SELECTORS["reset_button"], 5_000)
         reset_button.scroll_into_view_if_needed()
         reset_button.click()
-        page.locator(SELECTORS["hs_code_input"]).first.wait_for(state="visible", timeout=ELEMENT_TIMEOUT_MS)
+        wait_for_first_visible(page, SELECTORS["hs_code_input"], ELEMENT_TIMEOUT_MS)
     except PlaywrightTimeoutError:
         open_site(page)
-        page.locator(SELECTORS["hs_code_input"]).first.wait_for(state="visible", timeout=ELEMENT_TIMEOUT_MS)
+        wait_for_first_visible(page, SELECTORS["hs_code_input"], ELEMENT_TIMEOUT_MS)
 
 
 def ensure_initial_form(
@@ -998,40 +1138,37 @@ def ensure_initial_form(
     """
     저장된 브라우저 세션이 결과 화면을 복원해도 다음 자동화가 입력 화면에서 시작되도록 보장한다.
     """
-    hs_code_input = page.locator(SELECTORS["hs_code_input"]).first
-    new_analysis_button = page.locator(SELECTORS["new_analysis_button"]).first
-    reset_button = page.locator(SELECTORS["reset_button"]).first
-
     deadline = datetime.now().timestamp() + wait_seconds
     while datetime.now().timestamp() < deadline:
-        if is_visible(hs_code_input):
+        if first_visible_locator(page, SELECTORS["hs_code_input"]) is not None:
             return
-        if is_visible(new_analysis_button):
+        new_analysis_button = first_visible_locator(page, SELECTORS["new_analysis_button"])
+        if new_analysis_button is not None:
             if status_callback:
                 status_callback("이전 결과 화면이 감지되어 새 분석 화면으로 돌아갑니다.")
             new_analysis_button.scroll_into_view_if_needed()
             wait_until_enabled(page, new_analysis_button, ELEMENT_TIMEOUT_MS)
             new_analysis_button.click()
-            hs_code_input.wait_for(state="visible", timeout=ELEMENT_TIMEOUT_MS)
+            wait_for_first_visible(page, SELECTORS["hs_code_input"], ELEMENT_TIMEOUT_MS)
             return
-        if is_visible(reset_button):
+        reset_button = first_visible_locator(page, SELECTORS["reset_button"])
+        if reset_button is not None:
             if status_callback:
                 status_callback("입력 화면을 초기화합니다.")
             reset_button.scroll_into_view_if_needed()
             reset_button.click()
-            hs_code_input.wait_for(state="visible", timeout=ELEMENT_TIMEOUT_MS)
+            wait_for_first_visible(page, SELECTORS["hs_code_input"], ELEMENT_TIMEOUT_MS)
             return
         page.wait_for_timeout(300)
 
     if status_callback:
         status_callback("초기 입력 화면이 보이지 않아 KOTRA 페이지를 새로 엽니다.")
     open_site(page)
-    hs_code_input.wait_for(state="visible", timeout=ELEMENT_TIMEOUT_MS)
+    wait_for_first_visible(page, SELECTORS["hs_code_input"], ELEMENT_TIMEOUT_MS)
 
 
 def retry_generation(page: Page) -> None:
-    retry_button = page.locator(SELECTORS["retry_button"]).first
-    retry_button.wait_for(state="visible", timeout=ELEMENT_TIMEOUT_MS)
+    retry_button = wait_for_first_visible(page, SELECTORS["retry_button"], ELEMENT_TIMEOUT_MS)
     retry_button.scroll_into_view_if_needed()
     wait_until_enabled(page, retry_button, ELEMENT_TIMEOUT_MS)
     retry_button.click()
@@ -1448,18 +1585,27 @@ def submit_and_download_report(
             )
         except RuntimeError as exc:
             last_error = exc
-            if "초기 입력 화면" in str(exc):
+            message = str(exc)
+            # 페이지를 더 조작하기 전에(화면이 바뀌기 전에) 실패 순간의 진단을 남긴다.
+            fatal_markers = (
+                ("초기 입력 화면", "returned_to_form"),
+                ("생성 요청이 중단", "generation_aborted"),
+                ("생성이 멈춘", "generation_stalled"),
+                ("분석이 중단", "analysis_stopped"),
+            )
+            fatal_suffix = next((suffix for marker, suffix in fatal_markers if marker in message), None)
+            if fatal_suffix:
                 artifacts = save_failure_artifacts(
                     page,
                     row_data,
                     log_dir,
-                    str(exc),
+                    message,
                     diagnostic_events,
-                    suffix="returned_to_form",
+                    suffix=fatal_suffix,
                 )
-                raise GenerationError(str(exc), artifacts) from exc
+                raise GenerationError(message, artifacts) from exc
 
-            if "서버 스트리밍 오류" not in str(exc) or attempt >= retry_count:
+            if "서버 스트리밍 오류" not in message or attempt >= retry_count:
                 raise
 
             artifacts = save_failure_artifacts(
@@ -1815,6 +1961,8 @@ def run_parallel_automation(
             or "오류 화면" in message
             or "초기 입력 화면" in message
             or "분석이 중단" in message
+            or "생성 요청이 중단" in message
+            or "생성이 멈춘" in message
         ):
             clear_wait_status(session_id)
         emit_progress(f"{prefix} {message}")
