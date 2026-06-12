@@ -381,6 +381,7 @@ class KotraReportAppV2(ctk.CTk):
         self._table_build_specs: list[tuple[str, dict]] = []
         self._table_build_index = 0
         self._table_font_cache: dict[str, ctk.CTkFont] = {}
+        self._table_measure_font_cache: dict[tuple[str, int], tkfont.Font] = {}
         self._table_column_widths = {column: minsize for column, minsize, _weight in _TABLE_COLUMN_LAYOUT}
         self._table_column_min_widths = {
             column: _TABLE_COLUMN_MIN_WIDTH_OVERRIDES.get(column, max(36, int(minsize * 0.55)))
@@ -1157,10 +1158,14 @@ class KotraReportAppV2(ctk.CTk):
 
     def _apply_columns_to_frame(self, frame: ctk.CTkFrame) -> None:
         gutter_col = len(_TABLE_COLUMN_LAYOUT)  # 실제 열(0~7) 뒤의 거터 열
+        # customtkinter 는 위젯 폭과 폰트를 DPI 배율(윈도우 125% 등)만큼 키우지만
+        # grid minsize 는 raw px 그대로 적용된다. 같은 배율을 곱해 줘야 배율 환경에서
+        # 상태 배지 같은 고정폭 위젯이 열보다 커져 이웃 열을 밀어내는 일이 없다.
+        scaling = self._widget_scaling_factor()
         for column, _minsize, weight in _TABLE_COLUMN_LAYOUT:
             frame.grid_columnconfigure(
                 column,
-                minsize=self._table_column_widths.get(column, _minsize),
+                minsize=round(self._table_column_widths.get(column, _minsize) * scaling),
                 weight=weight,
             )
         # 헤더는 스크롤 영역 밖이라, 스크롤바가 보일 때 본문 내부보다 그 폭만큼 넓어진다.
@@ -1169,7 +1174,7 @@ class KotraReportAppV2(ctk.CTk):
         is_header = frame is self._progress_header
         frame.grid_columnconfigure(
             gutter_col,
-            minsize=(self._header_gutter if is_header else 0),
+            minsize=(round(self._header_gutter * scaling) if is_header else 0),
             weight=0,
         )
 
@@ -1273,7 +1278,8 @@ class KotraReportAppV2(ctk.CTk):
         next_column = state["next_column"]
         start_width = state["start_width"]
         next_start_width = state["next_start_width"]
-        dx = int(event.x_root) - state["x_root"]
+        # 마우스 이동량은 실제(px)지만 열 폭은 배율 적용 전 단위로 관리하므로 환산한다.
+        dx = round((int(event.x_root) - state["x_root"]) / self._widget_scaling_factor())
 
         min_width = self._table_column_min_widths.get(column, 36)
         next_min_width = self._table_column_min_widths.get(next_column, 36)
@@ -1350,8 +1356,11 @@ class KotraReportAppV2(ctk.CTk):
         row_lbl = ctk.CTkLabel(frame, text="", text_color=COLORS["muted"], font=self._table_font("body12"), anchor="center")
         row_lbl.grid(row=0, column=0, sticky="nsew", padx=(8, 4))
 
-        product_box = ctk.CTkFrame(frame, fg_color="transparent")
+        product_box = ctk.CTkFrame(frame, fg_color="transparent", width=8, height=8)
         product_box.grid(row=0, column=1, sticky="nsew", padx=(4, 4))
+        # 텍스트 측정이 어긋나도(폰트 대체 등) 이웃 열을 밀지 않도록 자식 크기 전파를
+        # 끊는다. 넘치는 텍스트는 셀 경계에서 잘릴 뿐 열 정렬은 유지된다.
+        product_box.grid_propagate(False)
         product_box.grid_columnconfigure(0, weight=1)
         product_box.grid_columnconfigure(1, weight=0)
         product_box.grid_rowconfigure(0, weight=1)
@@ -1375,6 +1384,7 @@ class KotraReportAppV2(ctk.CTk):
 
         hs_lbl = ctk.CTkLabel(frame, text="", text_color=COLORS["muted"], font=self._table_font("mono12"), anchor="center", width=1)
         hs_lbl.grid(row=0, column=2, sticky="nsew", padx=(4, 4))
+        hs_tooltip = self._attach_tooltip(hs_lbl, "")
         country_lbl = ctk.CTkLabel(frame, text="", text_color=COLORS["muted"], font=self._table_font("body12"), anchor="center", width=1)
         country_lbl.grid(row=0, column=3, sticky="nsew", padx=(4, 4))
         country_tooltip = self._attach_tooltip(country_lbl, "")
@@ -1408,6 +1418,7 @@ class KotraReportAppV2(ctk.CTk):
             "mode_lbl": mode_lbl,
             "toggle_btn": toggle_btn,
             "hs_lbl": hs_lbl,
+            "hs_tooltip": hs_tooltip,
             "country_lbl": country_lbl,
             "country_tooltip": country_tooltip,
             "session_lbl": session_lbl,
@@ -1651,6 +1662,7 @@ class KotraReportAppV2(ctk.CTk):
         configure_once("session", "session_lbl")
         configure_once("elapsed", "elapsed_lbl")
         self._set_slot_tooltip(slot, "product_tooltip", values.get("product_full", ""), values["product"])
+        self._set_slot_tooltip(slot, "hs_tooltip", values.get("hs_full", ""), values["hs"])
         self._set_slot_tooltip(slot, "country_tooltip", values.get("country_full", ""), values["country"])
 
         product_box = slot["product_box"]
@@ -1720,12 +1732,14 @@ class KotraReportAppV2(ctk.CTk):
                 toggle_width = 76 if expanded else 92
             product = str(row.get("product_name", ""))
             country = str(row.get("target_country", "")) or "—"
+            hs = str(row.get("hs_code", ""))
             return {
                 "row": str(row.get("row_index", "")),
                 "product": self._fit_table_text(product, "body13", 1, 16),
                 "product_full": product,
                 "mode": self._mode_label(str(row.get("report_mode", "")), bool(row.get("recommend_then_direct", False))),
-                "hs": str(row.get("hs_code", "")),
+                "hs": self._fit_table_text(hs, "mono12", 2, 16),
+                "hs_full": hs,
                 "country": self._fit_table_text(country, "body12", 3, 16),
                 "country_full": country,
                 "session": self._row_session_by_key.get(key, "—"),
@@ -1744,6 +1758,7 @@ class KotraReportAppV2(ctk.CTk):
             "product_full": product,
             "mode": "",
             "hs": "",
+            "hs_full": "",
             "country": "",
             "country_full": "",
             "session": "",
@@ -1803,9 +1818,36 @@ class KotraReportAppV2(ctk.CTk):
             self._table_font_cache[key] = font
         return font
 
+    def _widget_scaling_factor(self) -> float:
+        # 윈도우 DPI 배율 환경에서 customtkinter 가 위젯/폰트에 곱하는 배율.
+        # 열 폭(minsize)과 텍스트 측정에 같은 값을 곱해야 렌더링과 계산이 일치한다.
+        try:
+            scaling = float(ctk.ScalingTracker.get_widget_scaling(self))
+        except Exception:
+            return 1.0
+        return scaling if scaling > 0 else 1.0
+
+    def _table_measure_font(self, font_key: str) -> tkfont.Font:
+        # 라벨에 실제 적용되는 폰트는 위젯 배율이 곱해진 크기다(customtkinter 내부 동작).
+        # 원본 CTkFont.measure() 는 배율 적용 전 크기로 재서 좁게 나오므로,
+        # 배율을 곱한 측정 전용 폰트를 만들어 캐시해 둔다.
+        scaling = self._widget_scaling_factor()
+        cache_key = (font_key, round(scaling * 100))
+        font = self._table_measure_font_cache.get(cache_key)
+        if font is None:
+            base = self._table_font(font_key)
+            font = tkfont.Font(font=base)
+            try:
+                base_size = abs(int(base.cget("size")))
+            except Exception:
+                base_size = int(self._TABLE_FONT_SPECS[font_key].get("size", 12))
+            font.configure(size=-abs(round(base_size * scaling)))
+            self._table_measure_font_cache[cache_key] = font
+        return font
+
     def _table_text_width(self, text: str, font_key: str) -> int:
         try:
-            return int(self._table_font(font_key).measure(text))
+            return int(self._table_measure_font(font_key).measure(text))
         except Exception:
             return len(text) * 8
 
@@ -1814,7 +1856,9 @@ class KotraReportAppV2(ctk.CTk):
         if not text:
             return ""
 
-        max_width = max(24, int(self._table_column_widths.get(column, 80)) - horizontal_padding)
+        scaling = self._widget_scaling_factor()
+        column_width = round(int(self._table_column_widths.get(column, 80)) * scaling)
+        max_width = max(24, column_width - round(horizontal_padding * scaling))
         if self._table_text_width(text, font_key) <= max_width:
             return text
 

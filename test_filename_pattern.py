@@ -196,7 +196,10 @@ class FilenamePatternTest(unittest.TestCase):
         self.assertEqual(split_country_values("베트남, 미국/일본\n베트남"), ["베트남", "미국", "일본"])
 
     def test_maps_uae_country_alias(self) -> None:
-        self.assertEqual(split_country_values("UAE, 미국/uae"), ["아랍에미리트", "미국"])
+        self.assertEqual(
+            split_country_values("UAE, 미국/uae/U.A.E./United Arab Emirates"),
+            ["아랍에미리트", "미국"],
+        )
 
     def test_normalizes_export_scale_with_mixed_amount_text(self) -> None:
         self.assertEqual(

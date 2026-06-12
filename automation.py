@@ -1821,6 +1821,7 @@ def truthy(value: Any) -> bool:
 COUNTRY_NONE_PLACEHOLDER_RE = re.compile(r"[-–—―－]+")
 COUNTRY_NAME_ALIASES = {
     "uae": "아랍에미리트",
+    "unitedarabemirates": "아랍에미리트",
 }
 
 
@@ -1846,7 +1847,7 @@ def normalize_single_country(value: Any) -> str:
     text = text.strip(" ,")
     if COUNTRY_NONE_PLACEHOLDER_RE.fullmatch(text):
         return ""
-    alias = COUNTRY_NAME_ALIASES.get(normalize_country_key(text))
+    alias = COUNTRY_NAME_ALIASES.get(normalize_country_alias_key(text))
     if alias:
         return alias
     return text
@@ -1858,6 +1859,10 @@ def join_country_values(countries: list[str]) -> str:
 
 def normalize_country_key(value: Any) -> str:
     return re.sub(r"\s+", "", str(value or "").strip()).lower()
+
+
+def normalize_country_alias_key(value: Any) -> str:
+    return re.sub(r"[\s._-]+", "", str(value or "").strip()).lower()
 
 
 def extract_recommended_countries(page: Page, row_data: dict[str, Any], needed_count: int) -> list[str]:
@@ -3282,8 +3287,8 @@ def read_failed_rows(log_dir: str | Path) -> list[dict[str, Any]]:
         row["row_index"] = int(row_index_text) if row_index_text.isdigit() else fallback_index
         row["company_name"] = normalize_field_value("company_name", get_source_value(record, "company_name"))
         row["business_number"] = normalize_field_value("business_number", get_source_value(record, "business_number"))
-        row["recommended_countries"] = str(record.get("recommended_countries", "")).strip()
-        row["final_target_countries"] = str(record.get("final_target_countries", "")).strip()
+        row["recommended_countries"] = normalize_target_country(str(record.get("recommended_countries", "")).strip())
+        row["final_target_countries"] = normalize_target_country(str(record.get("final_target_countries", "")).strip())
         row["recommendation_report_file"] = str(record.get("recommendation_report_file", "")).strip()
         row["direct_report_files"] = str(record.get("direct_report_files", "")).strip()
         rows.append(row)
