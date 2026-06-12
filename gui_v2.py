@@ -73,6 +73,11 @@ _TABLE_COLUMN_LAYOUT = [
     (6, 82, 1),    # 경과
     (7, 72, 1),    # 파일
 ]
+_TABLE_COLUMN_MIN_WIDTH_OVERRIDES = {
+    1: 180,  # 상품명+작업 토글이 한 행 안에서 무너지지 않는 하한
+    3: 96,   # 아랍에미리트처럼 긴 국가명이 들어와도 이웃 컬럼 침범 방지
+    5: 112,
+}
 _RESIZE_HANDLE_COLOR = "#d8e0eb"
 _RESIZE_HANDLE_HOVER_COLOR = COLORS["primary"]
 _RESIZE_HANDLE_BG_HOVER = "#f3f7ff"
@@ -278,6 +283,12 @@ class HoverTooltip:
         if HoverTooltip.active is self:
             HoverTooltip.active = None
 
+    def set_text(self, text: str) -> None:
+        if self.text == text:
+            return
+        self.text = text
+        self._hide_now()
+
     def _font_family(self) -> str:
         if sys.platform.startswith("win"):
             return "Malgun Gothic"
@@ -371,7 +382,10 @@ class KotraReportAppV2(ctk.CTk):
         self._table_build_index = 0
         self._table_font_cache: dict[str, ctk.CTkFont] = {}
         self._table_column_widths = {column: minsize for column, minsize, _weight in _TABLE_COLUMN_LAYOUT}
-        self._table_column_min_widths = {column: max(36, int(minsize * 0.55)) for column, minsize, _weight in _TABLE_COLUMN_LAYOUT}
+        self._table_column_min_widths = {
+            column: _TABLE_COLUMN_MIN_WIDTH_OVERRIDES.get(column, max(36, int(minsize * 0.55)))
+            for column, minsize, _weight in _TABLE_COLUMN_LAYOUT
+        }
         self._table_frames: list[ctk.CTkFrame] = []
         self._column_resize_state: dict[str, int] | None = None
         self._page_frame: ctk.CTkScrollableFrame | None = None
@@ -419,8 +433,10 @@ class KotraReportAppV2(ctk.CTk):
         self.after(200, self._poll_events)
         self.after(1000, self._tick_elapsed)
 
-    def _attach_tooltip(self, widget: tk.Widget, text: str) -> None:
-        self.tooltips.append(HoverTooltip(widget, text))
+    def _attach_tooltip(self, widget: tk.Widget, text: str) -> HoverTooltip:
+        tooltip = HoverTooltip(widget, text)
+        self.tooltips.append(tooltip)
+        return tooltip
 
     def _build_ui(self) -> None:
         self.grid_columnconfigure(0, weight=1)
@@ -1266,6 +1282,7 @@ class KotraReportAppV2(ctk.CTk):
         self._table_column_widths[column] = start_width + applied_dx
         self._table_column_widths[next_column] = next_start_width - applied_dx
         self._apply_table_column_layout()
+        self._render_progress_viewport()
         return "break"
 
     def _end_column_resize(self, _event: tk.Event) -> str:
@@ -1339,9 +1356,10 @@ class KotraReportAppV2(ctk.CTk):
         product_box.grid_columnconfigure(1, weight=0)
         product_box.grid_rowconfigure(0, weight=1)
         product_box.grid_rowconfigure(1, weight=0)
-        product_lbl = ctk.CTkLabel(product_box, text="", text_color=COLORS["text"], font=self._table_font("body13"), anchor="w")
+        product_lbl = ctk.CTkLabel(product_box, text="", text_color=COLORS["text"], font=self._table_font("body13"), anchor="w", width=1)
         product_lbl.grid(row=0, column=0, sticky="nsew", columnspan=2, rowspan=2)
-        mode_lbl = ctk.CTkLabel(product_box, text="", text_color=COLORS["muted"], font=self._table_font("mode10"), anchor="w")
+        product_tooltip = self._attach_tooltip(product_lbl, "")
+        mode_lbl = ctk.CTkLabel(product_box, text="", text_color=COLORS["muted"], font=self._table_font("mode10"), anchor="w", width=1)
         mode_lbl.grid(row=1, column=0, sticky="ew", pady=(0, 1))
         toggle_btn = ctk.CTkButton(
             product_box,
@@ -1355,15 +1373,16 @@ class KotraReportAppV2(ctk.CTk):
             command=lambda index=slot_index: self._toggle_child_tasks_for_slot(index),
         )
 
-        hs_lbl = ctk.CTkLabel(frame, text="", text_color=COLORS["muted"], font=self._table_font("mono12"), anchor="center")
+        hs_lbl = ctk.CTkLabel(frame, text="", text_color=COLORS["muted"], font=self._table_font("mono12"), anchor="center", width=1)
         hs_lbl.grid(row=0, column=2, sticky="nsew", padx=(4, 4))
-        country_lbl = ctk.CTkLabel(frame, text="", text_color=COLORS["muted"], font=self._table_font("body12"), anchor="center")
+        country_lbl = ctk.CTkLabel(frame, text="", text_color=COLORS["muted"], font=self._table_font("body12"), anchor="center", width=1)
         country_lbl.grid(row=0, column=3, sticky="nsew", padx=(4, 4))
-        session_lbl = ctk.CTkLabel(frame, text="", text_color=COLORS["muted"], font=self._table_font("body12"), anchor="center")
+        country_tooltip = self._attach_tooltip(country_lbl, "")
+        session_lbl = ctk.CTkLabel(frame, text="", text_color=COLORS["muted"], font=self._table_font("body12"), anchor="center", width=1)
         session_lbl.grid(row=0, column=4, sticky="nsew", padx=(4, 4))
         status_lbl = self._status_pill(frame, "처리 안됨")
         status_lbl.grid(row=0, column=5, sticky="", padx=(4, 4))
-        elapsed_lbl = ctk.CTkLabel(frame, text="", text_color=COLORS["muted"], font=self._table_font("body12"), anchor="center")
+        elapsed_lbl = ctk.CTkLabel(frame, text="", text_color=COLORS["muted"], font=self._table_font("body12"), anchor="center", width=1)
         elapsed_lbl.grid(row=0, column=6, sticky="nsew", padx=(4, 4))
         file_button = ctk.CTkButton(
             frame,
@@ -1385,10 +1404,12 @@ class KotraReportAppV2(ctk.CTk):
             "row_lbl": row_lbl,
             "product_box": product_box,
             "product_lbl": product_lbl,
+            "product_tooltip": product_tooltip,
             "mode_lbl": mode_lbl,
             "toggle_btn": toggle_btn,
             "hs_lbl": hs_lbl,
             "country_lbl": country_lbl,
+            "country_tooltip": country_tooltip,
             "session_lbl": session_lbl,
             "status_lbl": status_lbl,
             "elapsed_lbl": elapsed_lbl,
@@ -1629,6 +1650,8 @@ class KotraReportAppV2(ctk.CTk):
         configure_once("country", "country_lbl")
         configure_once("session", "session_lbl")
         configure_once("elapsed", "elapsed_lbl")
+        self._set_slot_tooltip(slot, "product_tooltip", values.get("product_full", ""), values["product"])
+        self._set_slot_tooltip(slot, "country_tooltip", values.get("country_full", ""), values["country"])
 
         product_box = slot["product_box"]
         product_lbl = slot["product_lbl"]
@@ -1695,12 +1718,16 @@ class KotraReportAppV2(ctk.CTk):
             if len(child_keys) > 1:
                 toggle_text = "▼ 접기" if expanded else f"▶ 작업 {len(child_keys)}개"
                 toggle_width = 76 if expanded else 92
+            product = str(row.get("product_name", ""))
+            country = str(row.get("target_country", "")) or "—"
             return {
                 "row": str(row.get("row_index", "")),
-                "product": str(row.get("product_name", ""))[:35],
+                "product": self._fit_table_text(product, "body13", 1, 16),
+                "product_full": product,
                 "mode": self._mode_label(str(row.get("report_mode", "")), bool(row.get("recommend_then_direct", False))),
                 "hs": str(row.get("hs_code", "")),
-                "country": str(row.get("target_country", ""))[:20] or "—",
+                "country": self._fit_table_text(country, "body12", 3, 16),
+                "country_full": country,
                 "session": self._row_session_by_key.get(key, "—"),
                 "status": self._row_status_by_key.get(key, "처리 안됨"),
                 "elapsed": self._row_elapsed_by_key.get(key, "—"),
@@ -1710,12 +1737,15 @@ class KotraReportAppV2(ctk.CTk):
             }
 
         state = self._child_state_by_key.get(key, {})
+        product = self._child_label_for_key(key)
         return {
             "row": "↳",
-            "product": self._child_label_for_key(key),
+            "product": self._fit_table_text(product, "body12", 1, 16),
+            "product_full": product,
             "mode": "",
             "hs": "",
             "country": "",
+            "country_full": "",
             "session": "",
             "status": str(state.get("status", "처리 안됨")),
             "elapsed": str(state.get("elapsed_str") or "—"),
@@ -1773,6 +1803,40 @@ class KotraReportAppV2(ctk.CTk):
             self._table_font_cache[key] = font
         return font
 
+    def _table_text_width(self, text: str, font_key: str) -> int:
+        try:
+            return int(self._table_font(font_key).measure(text))
+        except Exception:
+            return len(text) * 8
+
+    def _fit_table_text(self, value: object, font_key: str, column: int, horizontal_padding: int = 16) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return ""
+
+        max_width = max(24, int(self._table_column_widths.get(column, 80)) - horizontal_padding)
+        if self._table_text_width(text, font_key) <= max_width:
+            return text
+
+        suffix = "..."
+        suffix_width = self._table_text_width(suffix, font_key)
+        available = max(1, max_width - suffix_width)
+        fitted = ""
+        for char in text:
+            candidate = fitted + char
+            if self._table_text_width(candidate, font_key) > available:
+                break
+            fitted = candidate
+        return f"{fitted.rstrip()}{suffix}" if fitted else suffix
+
+    def _set_slot_tooltip(self, slot: dict, tooltip_key: str, full_text: object, display_text: object) -> None:
+        tooltip = slot.get(tooltip_key)
+        if not isinstance(tooltip, HoverTooltip):
+            return
+        full = str(full_text or "").strip()
+        display = str(display_text or "").strip()
+        tooltip.set_text(full if full and full != display else "")
+
     def _make_data_row(self, parent: ctk.CTkScrollableFrame, row_index: int,
                        product: str, hs: str, country: str, mode_lbl: str) -> dict:
         frame = ctk.CTkFrame(parent, fg_color=COLORS["surface"], corner_radius=4, height=38)
@@ -1787,11 +1851,21 @@ class KotraReportAppV2(ctk.CTk):
         product_box.grid(row=0, column=1, sticky="ew", padx=(4, 4))
         product_box.grid_columnconfigure(0, weight=1)
         product_box.grid_columnconfigure(1, weight=0)
-        ctk.CTkLabel(product_box, text=product, text_color=COLORS["text"],
-                     font=self._table_font("body13"), anchor="w",
-                     ).grid(row=0, column=0, sticky="ew", columnspan=2)
+        product_text = self._fit_table_text(product, "body13", 1, 16)
+        country_text = self._fit_table_text(country, "body12", 3, 16)
+        product_lbl = ctk.CTkLabel(
+            product_box,
+            text=product_text,
+            text_color=COLORS["text"],
+            font=self._table_font("body13"),
+            anchor="w",
+            width=1,
+        )
+        product_lbl.grid(row=0, column=0, sticky="ew", columnspan=2)
+        if product_text != product:
+            self._attach_tooltip(product_lbl, product)
         ctk.CTkLabel(product_box, text=mode_lbl, text_color=COLORS["muted"],
-                     font=self._table_font("mode10"), anchor="w",
+                     font=self._table_font("mode10"), anchor="w", width=1,
                      ).grid(row=1, column=0, sticky="ew", pady=(0, 1))
         child_toggle = ctk.CTkButton(
             product_box,
@@ -1805,18 +1879,21 @@ class KotraReportAppV2(ctk.CTk):
             command=lambda: None,
         )
         ctk.CTkLabel(frame, text=hs, text_color=COLORS["muted"],
-                     font=self._table_font("mono12"), anchor="center",
+                     font=self._table_font("mono12"), anchor="center", width=1,
                      ).grid(row=0, column=2, sticky="ew", padx=(4, 4))
-        ctk.CTkLabel(frame, text=country, text_color=COLORS["muted"],
-                     font=self._table_font("body12"), anchor="center",
-                     ).grid(row=0, column=3, sticky="ew", padx=(4, 4))
+        country_lbl = ctk.CTkLabel(frame, text=country_text, text_color=COLORS["muted"],
+                     font=self._table_font("body12"), anchor="center", width=1,
+                     )
+        country_lbl.grid(row=0, column=3, sticky="ew", padx=(4, 4))
+        if country_text != country:
+            self._attach_tooltip(country_lbl, country)
         session_lbl = ctk.CTkLabel(frame, text="—", text_color=COLORS["muted"],
-                                   font=self._table_font("body12"), anchor="center")
+                                   font=self._table_font("body12"), anchor="center", width=1)
         session_lbl.grid(row=0, column=4, sticky="ew", padx=(4, 4))
         status_lbl = self._status_pill(frame, "처리 안됨")
         status_lbl.grid(row=0, column=5, sticky="", padx=(4, 4))
         elapsed_lbl = ctk.CTkLabel(frame, text="—", text_color=COLORS["muted"],
-                                   font=self._table_font("body12"), anchor="center")
+                                   font=self._table_font("body12"), anchor="center", width=1)
         elapsed_lbl.grid(row=0, column=6, sticky="ew", padx=(4, 4))
         file_button = ctk.CTkButton(
             frame,
@@ -1885,13 +1962,17 @@ class KotraReportAppV2(ctk.CTk):
         ctk.CTkLabel(frame, text="↳", text_color=COLORS["muted"],
                      font=self._table_font("glyph11"), anchor="e", width=20,
                      ).grid(row=0, column=0, sticky="e", padx=(0, 6))
-        ctk.CTkLabel(frame, text=task_label, text_color=COLORS["muted"],
-                     font=self._table_font("body12"), anchor="w",
-                     ).grid(row=0, column=1, sticky="ew", padx=(10, 4))
+        task_text = self._fit_table_text(task_label, "body12", 1, 18)
+        task_lbl = ctk.CTkLabel(frame, text=task_text, text_color=COLORS["muted"],
+                     font=self._table_font("body12"), anchor="w", width=1,
+                     )
+        task_lbl.grid(row=0, column=1, sticky="ew", padx=(10, 4))
+        if task_text != task_label:
+            self._attach_tooltip(task_lbl, task_label)
         status_lbl = self._status_pill(frame, "처리 안됨", width=108)
         status_lbl.grid(row=0, column=5, padx=(4, 4))
         elapsed_lbl = ctk.CTkLabel(frame, text="—", text_color=COLORS["muted"],
-                                   font=self._table_font("body12"), anchor="center")
+                                   font=self._table_font("body12"), anchor="center", width=1)
         elapsed_lbl.grid(row=0, column=6, sticky="ew", padx=(4, 4))
         file_button = ctk.CTkButton(
             frame,
