@@ -55,6 +55,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--use-storage-state", action="store_true", help="state.json 브라우저 세션을 사용하고 실행 후 다시 저장합니다.")
     parser.add_argument("--no-storage-state", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--retry-failed", action="store_true", help="logs/failed_rows.xlsx에 기록된 실패 행만 다시 실행합니다.")
+    parser.add_argument("--resume", action="store_true", help="logs/processing_status.xlsx 기준으로 이미 완료된 행은 건너뛰고 다시 실행합니다.")
     parser.add_argument("--no-auto-retry", action="store_true", help="행 처리 실패 시 기본 1회 자동 재시도를 사용하지 않습니다.")
     parser.add_argument("--parallel-sessions", type=parallel_session_count, default=1, help=f"동시에 실행할 브라우저 세션 수(1~{MAX_PARALLEL_SESSIONS})")
     parser.add_argument(
@@ -81,6 +82,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = build_parser().parse_args()
+    if args.retry_failed and args.resume:
+        print("--retry-failed와 --resume은 함께 사용할 수 없습니다. 하나만 선택해주세요.")
+        return 1
 
     if args.create_template:
         from template import create_input_template
@@ -115,6 +119,7 @@ def main() -> int:
         use_storage_state=use_storage_state,
         save_storage_state=use_storage_state,
         retry_failed_only=args.retry_failed,
+        resume_incomplete=args.resume,
         wait_for_manual_login=args.login_wait,
         parallel_sessions=args.parallel_sessions,
         row_retry_count=0 if args.no_auto_retry else DEFAULT_ROW_RETRY_COUNT,
@@ -125,7 +130,8 @@ def main() -> int:
     )
 
     print("작업이 완료되었습니다.")
-    print(f"전체: {result['total']}건 / 성공: {result['success']}건 / 실패: {result['failed']}건")
+    skipped_text = f" / 건너뜀: {result.get('skipped', 0)}건" if result.get("skipped", 0) else ""
+    print(f"전체: {result['total']}건 / 성공: {result['success']}건 / 실패: {result['failed']}건{skipped_text}")
     return 0
 
 

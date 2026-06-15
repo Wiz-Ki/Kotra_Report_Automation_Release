@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import queue
 import re
+import hashlib
 import importlib.util
+import json
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -102,6 +104,7 @@ PROCESSING_STATUS_COLUMNS = [
     "final_target_countries",
     "recommendation_report_file",
     "direct_report_files",
+    "input_fingerprint",
     *STATUS_COLUMNS,
 ]
 STATUS_PENDING = "처리 안됨"
@@ -2045,6 +2048,7 @@ def run_parallel_automation(
     use_storage_state: bool,
     save_storage_state: bool,
     retry_failed_only: bool,
+    resume_incomplete: bool,
     wait_for_manual_login: bool,
     parallel_sessions: int,
     row_retry_count: int,
@@ -2059,11 +2063,19 @@ def run_parallel_automation(
     task_status_callback: TaskStatusCallback | None = None,
 ) -> dict[str, Any]:
     total = len(rows)
-    worker_count = min(normalize_parallel_sessions(parallel_sessions), total)
+    skipped_row_numbers = {
+        row_number
+        for row_number, row_data in enumerate(rows, start=1)
+        if truthy(row_data.get("resume_skip", False))
+    }
+    pending_count = total - len(skipped_row_numbers)
+    worker_count = min(normalize_parallel_sessions(parallel_sessions), pending_count)
     row_retry_count = normalize_row_retry_count(row_retry_count)
     direct_report_count = normalize_direct_report_count(direct_report_count)
     row_queue: queue.Queue[tuple[int, dict[str, Any], int]] = queue.Queue()
     for row_number, row_data in enumerate(rows, start=1):
+        if row_number in skipped_row_numbers:
+            continue
         row_queue.put((row_number, row_data, 0))
 
     counter_lock = threading.Lock()
@@ -2073,10 +2085,10 @@ def run_parallel_automation(
     wait_statuses: dict[int, tuple[str, int]] = {}
     storage_state_saved = False
     active_workers = worker_count
-    success_count = 0
+    success_count = len(skipped_row_numbers)
     failed_count = 0
-    completed_count = 0
-    completed_row_numbers: set[int] = set()
+    completed_count = len(skipped_row_numbers)
+    completed_row_numbers: set[int] = set(skipped_row_numbers)
     retry_pending_failed_numbers: set[int] = set()
     last_wait_summary_at = 0.0
 
@@ -2167,6 +2179,9 @@ def run_parallel_automation(
     if wait_for_manual_login:
         prepared = prepare_parallel_storage_state(state_path, headless, emit_status)
         use_storage_state = use_storage_state or prepared
+
+    if resume_incomplete and skipped_row_numbers:
+        emit_status(f"완료 건너뛰고 재시작: 이미 완료된 {len(skipped_row_numbers)}건은 건너뜁니다.")
 
     emit_status(f"병렬 처리 모드로 실행합니다: {worker_count}개 세션")
     emit_progress("병렬 처리 준비 중")
@@ -2446,6 +2461,7 @@ def run_parallel_automation(
             "total": total,
             "success": success_count,
             "failed": failed_count,
+            "skipped": len(skipped_row_numbers),
             "stopped": intentionally_stopped,
             "force_stopped": combined_force_stop_requested(),
         }
@@ -2469,6 +2485,7 @@ def run_automation(
     use_storage_state: bool = False,
     save_storage_state: bool = False,
     retry_failed_only: bool = False,
+    resume_incomplete: bool = False,
     wait_for_manual_login: bool = False,
     status_callback: StatusCallback | None = None,
     progress_callback: ProgressCallback | None = None,
@@ -2511,14 +2528,20 @@ def run_automation(
         uses_recommend_link = row["report_mode"] == REPORT_MODE_RECOMMEND and truthy(row.get("recommend_then_direct", False))
         row["direct_report_count"] = direct_report_count if uses_recommend_link else DEFAULT_DIRECT_REPORT_COUNT
         row["use_task_resume"] = bool(retry_failed_only)
+        row["resume_skip"] = False
+
+    resume_skipped_count = 0
+    if resume_incomplete and not retry_failed_only:
+        resume_skipped_count = apply_resume_processing_status(input_excel_path, log_dir, rows)
+
     if rows_ready_callback:
         rows_ready_callback(rows)
     total = len(rows)
     row_retry_count = normalize_row_retry_count(row_retry_count)
-    success_count = 0
+    success_count = resume_skipped_count
     failed_count = 0
-    completed_count = 0
-    last_progress_index = 0
+    completed_count = resume_skipped_count
+    last_progress_index = completed_count
     retry_pending_failed_numbers: set[int] = set()
 
     def emit_status(message: str) -> None:
@@ -2574,15 +2597,32 @@ def run_automation(
     if retry_failed_only and total == 0:
         emit_status("재시도할 실패 행이 없습니다.")
         emit_progress(0, "완료")
-        return {"total": 0, "success": 0, "failed": 0, "stopped": False, "force_stopped": False}
+        return {"total": 0, "success": 0, "failed": 0, "skipped": 0, "stopped": False, "force_stopped": False}
 
-    if not retry_failed_only:
+    if not retry_failed_only and not resume_incomplete:
         initialize_processing_status(input_excel_path, log_dir, rows)
 
     if total == 0:
         emit_status("처리할 입력 행이 없습니다.")
         emit_progress(0, "완료")
-        return {"total": 0, "success": 0, "failed": 0, "stopped": False, "force_stopped": False}
+        return {"total": 0, "success": 0, "failed": 0, "skipped": 0, "stopped": False, "force_stopped": False}
+
+    if resume_incomplete and resume_skipped_count:
+        emit_status(f"완료 건너뛰고 재시작: 이미 완료된 {resume_skipped_count}건은 건너뜁니다.")
+        emit_progress(completed_count, "완료 건너뛰고 재시작 준비 중")
+
+    pending_rows = [row for row in rows if not truthy(row.get("resume_skip", False))]
+    if resume_incomplete and not pending_rows:
+        emit_status("완료 건너뛰고 재시작: 새로 처리할 행이 없습니다.")
+        emit_progress(completed_count, "완료")
+        return {
+            "total": total,
+            "success": success_count,
+            "failed": failed_count,
+            "skipped": resume_skipped_count,
+            "stopped": False,
+            "force_stopped": False,
+        }
 
     parallel_sessions = normalize_parallel_sessions(parallel_sessions)
     if parallel_sessions > 1:
@@ -2598,6 +2638,7 @@ def run_automation(
             use_storage_state=use_storage_state,
             save_storage_state=save_storage_state,
             retry_failed_only=retry_failed_only,
+            resume_incomplete=resume_incomplete,
             wait_for_manual_login=wait_for_manual_login,
             parallel_sessions=parallel_sessions,
             row_retry_count=row_retry_count,
@@ -2656,6 +2697,8 @@ def run_automation(
 
             row_queue: queue.Queue[tuple[int, dict[str, Any], int]] = queue.Queue()
             for row_number, row_data in enumerate(rows, start=1):
+                if truthy(row_data.get("resume_skip", False)):
+                    continue
                 row_queue.put((row_number, row_data, 0))
 
             next_retry_item: tuple[int, dict[str, Any], int] | None = None
@@ -2809,9 +2852,104 @@ def run_automation(
         "total": total,
         "success": success_count,
         "failed": failed_count,
+        "skipped": resume_skipped_count,
         "stopped": stopped,
         "force_stopped": bool(force_stop_requested and force_stop_requested()),
     }
+
+
+def apply_resume_processing_status(input_excel_path: str | Path, log_dir: str | Path, rows: list[dict[str, Any]]) -> int:
+    status_rows = read_processing_status_rows(processing_status_path(log_dir))
+    if not status_rows:
+        return 0
+
+    status_by_key: dict[tuple[str, ...], dict[str, str]] = {}
+    for status_row in status_rows:
+        status_by_key[row_identity(status_row)] = status_row
+
+    skipped_count = 0
+    for row_data in rows:
+        status_key = row_identity(build_processing_status_row(input_excel_path, row_data))
+        status_row = status_by_key.get(status_key)
+        if not status_row:
+            row_data["process_status"] = STATUS_PENDING
+            row_data["resume_skip"] = False
+            continue
+
+        if (
+            str(status_row.get(STATUS_COLUMN, "")).strip() == STATUS_SUCCESS
+            and resume_fingerprint_matches(row_data, status_row)
+            and saved_files_are_available(status_row.get(SAVED_FILE_COLUMN, ""))
+        ):
+            hydrate_row_from_processing_status(row_data, status_row)
+            row_data["process_status"] = STATUS_SUCCESS
+            row_data["saved_file"] = str(status_row.get(SAVED_FILE_COLUMN, "")).strip()
+            row_data["error_message"] = ""
+            row_data["resume_skip"] = True
+            row_data["use_task_resume"] = True
+            skipped_count += 1
+            continue
+
+        row_data["process_status"] = STATUS_PENDING
+        row_data["saved_file"] = ""
+        row_data["error_message"] = ""
+        row_data["resume_skip"] = False
+
+    return skipped_count
+
+
+def hydrate_row_from_processing_status(row_data: dict[str, Any], status_row: dict[str, str]) -> None:
+    for key in (
+        "recommended_countries",
+        "final_target_countries",
+        "recommendation_report_file",
+        "direct_report_files",
+    ):
+        value = str(status_row.get(key, "")).strip()
+        if value:
+            row_data[key] = value
+
+
+def resume_fingerprint_matches(row_data: dict[str, Any], status_row: dict[str, str]) -> bool:
+    saved_fingerprint = str(status_row.get("input_fingerprint", "")).strip()
+    if not saved_fingerprint:
+        return False
+    return saved_fingerprint == row_input_fingerprint(row_data)
+
+
+def row_input_fingerprint(row_data: dict[str, Any]) -> str:
+    fingerprint_fields = [
+        SOURCE_FILE_COLUMN,
+        "report_mode",
+        "recommend_then_direct",
+        "direct_report_count",
+        "row_index",
+        "company_name",
+        "business_number",
+        "hs_code",
+        "product_name",
+        "export_scale",
+        "export_experience",
+        "target_country",
+        "excluded_countries",
+    ]
+    payload = {
+        field: normalize_fingerprint_value(row_data.get(field, ""))
+        for field in fingerprint_fields
+    }
+    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def normalize_fingerprint_value(value: Any) -> str:
+    return re.sub(r"\s+", " ", str(value or "").strip())
+
+
+def saved_files_are_available(value: Any) -> bool:
+    paths = [part.strip() for part in str(value or "").split(";") if part.strip()]
+    if not paths:
+        return False
+    return all(Path(path).exists() for path in paths)
 
 
 def row_identity(row_data: dict[str, Any]) -> tuple[str, ...]:
@@ -3035,6 +3173,7 @@ def build_processing_status_row(input_excel_path: str | Path, row_data: dict[str
         "final_target_countries": str(row_data.get("final_target_countries", "")),
         "recommendation_report_file": str(row_data.get("recommendation_report_file", "")),
         "direct_report_files": str(row_data.get("direct_report_files", "")),
+        "input_fingerprint": row_input_fingerprint(row_data),
         STATUS_COLUMN: str(row_data.get("process_status", "")),
         STATUS_AT_COLUMN: "",
         SAVED_FILE_COLUMN: str(row_data.get("saved_file", "")),

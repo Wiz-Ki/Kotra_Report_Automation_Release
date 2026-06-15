@@ -342,6 +342,7 @@ class KotraReportAppV2(ctk.CTk):
 
         self.start_button: ctk.CTkButton | None = None
         self.retry_failed_button: ctk.CTkButton | None = None
+        self.resume_button: ctk.CTkButton | None = None
         self.stop_button: ctk.CTkButton | None = None
         self.force_stop_button: ctk.CTkButton | None = None
         self.status_badge: ctk.CTkLabel | None = None
@@ -415,6 +416,7 @@ class KotraReportAppV2(ctk.CTk):
         self.stop_requested = False
         self.force_stop_requested = False
         self.retry_failed_only_for_run = False
+        self.resume_incomplete_for_run = False
         self.auto_retry_runtime_enabled = True
         self.active_filename_pattern = ""
         self.filename_parts = [part.copy() for part in DEFAULT_FILENAME_PARTS]
@@ -990,6 +992,21 @@ class KotraReportAppV2(ctk.CTk):
         )
         self.retry_failed_button.pack(side="left", padx=(8, 0))
         self._attach_tooltip(self.retry_failed_button, "logs/failed_rows.xlsx에 남은 실패 항목만 다시 실행합니다.")
+
+        self.resume_button = ctk.CTkButton(
+            folders,
+            text="완료 건너뛰고 재시작",
+            width=168,
+            height=36,
+            fg_color=COLORS["surface"],
+            hover_color="#edf2f7",
+            border_width=1,
+            border_color=COLORS["border"],
+            text_color=COLORS["text"],
+            command=self._start_resume,
+        )
+        self.resume_button.pack(side="left", padx=(8, 0))
+        self._attach_tooltip(self.resume_button, "logs/processing_status.xlsx에서 완료된 행은 건너뛰고 남은 행만 실행합니다.")
 
     def _build_execution_board(self, parent: ctk.CTkFrame) -> None:
         panel = self._section(parent, 4, "실행 현황")
@@ -2909,12 +2926,15 @@ class KotraReportAppV2(ctk.CTk):
         return max(1, min(MAX_DIRECT_REPORT_COUNT, value))
 
     def _start(self) -> None:
-        self._start_run(retry_failed_only=False)
+        self._start_run(retry_failed_only=False, resume_incomplete=False)
 
     def _start_retry_failed(self) -> None:
-        self._start_run(retry_failed_only=True)
+        self._start_run(retry_failed_only=True, resume_incomplete=False)
 
-    def _start_run(self, retry_failed_only: bool) -> None:
+    def _start_resume(self) -> None:
+        self._start_run(retry_failed_only=False, resume_incomplete=True)
+
+    def _start_run(self, retry_failed_only: bool, resume_incomplete: bool) -> None:
         if self.worker and self.worker.is_alive():
             messagebox.showwarning("실행 중", "이미 작업이 실행 중입니다.")
             return
@@ -2929,6 +2949,7 @@ class KotraReportAppV2(ctk.CTk):
             return
         self.active_filename_pattern = filename_pattern
         self.retry_failed_only_for_run = retry_failed_only
+        self.resume_incomplete_for_run = resume_incomplete
 
         self.stop_requested = False
         self.force_stop_requested = False
@@ -2963,7 +2984,12 @@ class KotraReportAppV2(ctk.CTk):
         self._set_status_badge("running")
         self._set_progress(0)
         self._clear_log()
-        start_message = "실패 행 다시 실행을 시작합니다." if retry_failed_only else "작업을 시작합니다."
+        if retry_failed_only:
+            start_message = "실패 행 다시 실행을 시작합니다."
+        elif resume_incomplete:
+            start_message = "완료된 행은 건너뛰고 재시작합니다."
+        else:
+            start_message = "작업을 시작합니다."
         self._append_log(start_message, "info")
         self._sync_auto_retry_runtime(log_change=False)
         self._set_running_state(True)
@@ -2986,11 +3012,16 @@ class KotraReportAppV2(ctk.CTk):
     def _retry_failed_only(self) -> bool:
         return self.retry_failed_only_for_run
 
+    def _resume_incomplete(self) -> bool:
+        return self.resume_incomplete_for_run
+
     def _set_running_state(self, running: bool) -> None:
         if self.start_button is not None:
             self.start_button.configure(state="disabled" if running else "normal")
         if self.retry_failed_button is not None:
             self.retry_failed_button.configure(state="disabled" if running else "normal")
+        if self.resume_button is not None:
+            self.resume_button.configure(state="disabled" if running else "normal")
         if self.stop_button is not None:
             self.stop_button.configure(state="normal" if running else "disabled")
         if self.force_stop_button is not None:
@@ -3112,6 +3143,7 @@ class KotraReportAppV2(ctk.CTk):
                 use_storage_state=self.use_session.get(),
                 save_storage_state=self.use_session.get(),
                 retry_failed_only=self._retry_failed_only(),
+                resume_incomplete=self._resume_incomplete(),
                 wait_for_manual_login=False,
                 parallel_sessions=self._selected_parallel_sessions(),
                 row_retry_count=DEFAULT_ROW_RETRY_COUNT,
@@ -3293,11 +3325,16 @@ class KotraReportAppV2(ctk.CTk):
             for row in rows:
                 row_index = int(row.get("row_index", 0))
                 key = str(row.get("ui_key", "") or f"row:{row_index}")
-                self._row_status_by_key[key] = "처리 안됨"
+                initial_status = str(row.get("process_status", "") or "처리 안됨")
+                if initial_status not in _STATUS_BADGE_COLORS:
+                    initial_status = "처리 안됨"
+                saved_file_text = str(row.get("saved_file", "") or "")
+                saved_files = [path.strip() for path in saved_file_text.split(";") if path.strip()]
+                self._row_status_by_key[key] = initial_status
                 self._row_data_by_key[key] = dict(row)
                 self._row_session_by_key[key] = "—"
                 self._row_elapsed_by_key[key] = "—"
-                self._row_saved_files_by_key[key] = []
+                self._row_saved_files_by_key[key] = saved_files
                 self._progress_parent_keys.append(key)
                 self._init_queued_child_tasks(key, row)
         finally:
@@ -3471,7 +3508,8 @@ class KotraReportAppV2(ctk.CTk):
             (
                 f"전체 {result.get('total', 0)}건\n"
                 f"성공 {result.get('success', 0)}건\n"
-                f"실패 {result.get('failed', 0)}건"
+                f"실패 {result.get('failed', 0)}건\n"
+                f"건너뜀 {result.get('skipped', 0)}건"
             ),
         )
 
