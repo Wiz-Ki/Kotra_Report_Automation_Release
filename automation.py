@@ -82,6 +82,7 @@ STATUS_COLUMN = "처리상태"
 STATUS_AT_COLUMN = "처리일시"
 SAVED_FILE_COLUMN = "저장파일"
 ERROR_COLUMN = "오류메시지"
+INPUT_FINGERPRINT_COLUMN = "input_fingerprint"
 STATUS_COLUMNS = [
     STATUS_COLUMN,
     STATUS_AT_COLUMN,
@@ -104,7 +105,7 @@ PROCESSING_STATUS_COLUMNS = [
     "final_target_countries",
     "recommendation_report_file",
     "direct_report_files",
-    "input_fingerprint",
+    INPUT_FINGERPRINT_COLUMN,
     *STATUS_COLUMNS,
 ]
 STATUS_PENDING = "처리 안됨"
@@ -2911,7 +2912,7 @@ def hydrate_row_from_processing_status(row_data: dict[str, Any], status_row: dic
 
 
 def resume_fingerprint_matches(row_data: dict[str, Any], status_row: dict[str, str]) -> bool:
-    saved_fingerprint = str(status_row.get("input_fingerprint", "")).strip()
+    saved_fingerprint = str(status_row.get(INPUT_FINGERPRINT_COLUMN, "")).strip()
     if not saved_fingerprint:
         return False
     return saved_fingerprint == row_input_fingerprint(row_data)
@@ -3173,7 +3174,7 @@ def build_processing_status_row(input_excel_path: str | Path, row_data: dict[str
         "final_target_countries": str(row_data.get("final_target_countries", "")),
         "recommendation_report_file": str(row_data.get("recommendation_report_file", "")),
         "direct_report_files": str(row_data.get("direct_report_files", "")),
-        "input_fingerprint": row_input_fingerprint(row_data),
+        INPUT_FINGERPRINT_COLUMN: row_input_fingerprint(row_data),
         STATUS_COLUMN: str(row_data.get("process_status", "")),
         STATUS_AT_COLUMN: "",
         SAVED_FILE_COLUMN: str(row_data.get("saved_file", "")),
