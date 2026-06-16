@@ -10,6 +10,8 @@ ensure_stdlib_selectors()
 
 import pandas as pd
 
+from excel_io import write_excel_with_retry
+
 
 SUCCESS_COLUMNS = [
     "원본파일",
@@ -71,7 +73,7 @@ def _append_row(excel_path: Path, row: dict[str, Any], columns: list[str]) -> No
     df = pd.concat([df, pd.DataFrame([{column: row.get(column, "") for column in columns}])], ignore_index=True)
     extra_columns = [column for column in df.columns if column not in columns]
     df = df.reindex(columns=[*columns, *extra_columns], fill_value="")
-    df.to_excel(excel_path, index=False)
+    write_excel_with_retry(df, excel_path, index=False)
 
 
 def log_success_row(row_data: dict[str, Any], saved_file: str | Path, log_dir: str | Path) -> None:

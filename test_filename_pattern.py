@@ -11,13 +11,17 @@ import pandas as pd
 
 from automation import (
     STATUS_RETRY_PENDING,
+    STATUS_FAILED,
     STATUS_SUCCESS,
     TASK_TYPE_DIRECT,
     TASK_TYPE_RECOMMEND,
     completed_report_task,
+    initialize_processing_status,
     normalize_export_scale,
     normalize_direct_report_count,
     normalize_hs_code,
+    processing_status_path,
+    read_processing_status_rows,
     read_report_task_rows,
     report_tasks_path,
     read_failed_rows,
@@ -29,6 +33,7 @@ from automation import (
     validate_hs_code,
 )
 from logger import log_failed_row
+from excel_io import ExcelFileLockedError, write_excel_with_retry
 
 
 class FilenamePatternTest(unittest.TestCase):
@@ -396,6 +401,55 @@ class FilenamePatternTest(unittest.TestCase):
 
         self.assertEqual(rows[0]["report_mode"], "recommend")
         self.assertEqual(rows[0]["recommend_then_direct"], "True")
+
+    def test_processing_status_includes_task_summary(self) -> None:
+        with TemporaryDirectory() as tmp_dir:
+            log_dir = Path(tmp_dir) / "logs"
+            input_path = Path(tmp_dir) / "input.xlsx"
+            row = {
+                "원본파일": str(input_path),
+                "report_mode": "direct",
+                "recommend_then_direct": False,
+                "direct_report_count": 2,
+                "row_index": 1,
+                "hs_code": "330499",
+                "product_name": "마스크팩",
+                "export_scale": "성장기업 ($1,000,000 ~ $9,999,999)",
+                "export_experience": "O",
+                "target_country": "베트남, 태국",
+                "excluded_countries": "",
+            }
+            initialize_processing_status(input_path, log_dir, [row])
+            saved_file = Path(tmp_dir) / "베트남.pdf"
+            saved_file.write_text("pdf", encoding="utf-8")
+
+            update_report_task_status(log_dir, row, TASK_TYPE_DIRECT, "베트남", STATUS_SUCCESS, saved_file=saved_file)
+            update_report_task_status(log_dir, row, TASK_TYPE_DIRECT, "태국", STATUS_FAILED, error_message="테스트 실패")
+
+            status_rows = read_processing_status_rows(processing_status_path(log_dir))
+
+        self.assertEqual(status_rows[0]["하위작업요약"], "직접분석 1완료 1실패")
+        self.assertEqual(status_rows[0]["완료작업"], "베트남")
+        self.assertEqual(status_rows[0]["실패작업"], "태국")
+        self.assertEqual(status_rows[0]["남은작업"], "태국")
+
+    def test_excel_write_retries_permission_denied(self) -> None:
+        with TemporaryDirectory() as tmp_dir:
+            output_path = Path(tmp_dir) / "locked.xlsx"
+            df = pd.DataFrame([{"value": "ok"}])
+            with patch.object(pd.DataFrame, "to_excel", side_effect=[PermissionError("locked"), None]) as mocked_write:
+                with patch("excel_io.time.sleep", return_value=None):
+                    write_excel_with_retry(df, output_path)
+
+        self.assertEqual(mocked_write.call_count, 2)
+
+    def test_excel_write_raises_clear_error_after_retry_timeout(self) -> None:
+        with TemporaryDirectory() as tmp_dir:
+            output_path = Path(tmp_dir) / "locked.xlsx"
+            df = pd.DataFrame([{"value": "ok"}])
+            with patch.object(pd.DataFrame, "to_excel", side_effect=PermissionError("locked")):
+                with self.assertRaises(ExcelFileLockedError):
+                    write_excel_with_retry(df, output_path, retry_seconds=0)
 
 
 if __name__ == "__main__":

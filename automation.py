@@ -21,6 +21,7 @@ ensure_stdlib_selectors()
 import pandas as pd
 from playwright.sync_api import Error as PlaywrightError, Page, TimeoutError as PlaywrightTimeoutError, sync_playwright
 
+from excel_io import write_excel_with_retry
 from config import (
     DEFAULT_DOWNLOAD_DIR,
     DEFAULT_DIRECT_REPORT_COUNT,
@@ -83,6 +84,10 @@ STATUS_AT_COLUMN = "처리일시"
 SAVED_FILE_COLUMN = "저장파일"
 ERROR_COLUMN = "오류메시지"
 INPUT_FINGERPRINT_COLUMN = "input_fingerprint"
+TASK_SUMMARY_COLUMN = "하위작업요약"
+TASK_COMPLETED_COLUMN = "완료작업"
+TASK_FAILED_COLUMN = "실패작업"
+TASK_REMAINING_COLUMN = "남은작업"
 STATUS_COLUMNS = [
     STATUS_COLUMN,
     STATUS_AT_COLUMN,
@@ -105,6 +110,10 @@ PROCESSING_STATUS_COLUMNS = [
     "final_target_countries",
     "recommendation_report_file",
     "direct_report_files",
+    TASK_SUMMARY_COLUMN,
+    TASK_COMPLETED_COLUMN,
+    TASK_FAILED_COLUMN,
+    TASK_REMAINING_COLUMN,
     INPUT_FINGERPRINT_COLUMN,
     *STATUS_COLUMNS,
 ]
@@ -3024,7 +3033,7 @@ def _write_workbook_cache(cache: WorkbookStatusCache) -> None:
         [{column: row.get(column, "") for column in cache.columns} for row in rows],
         columns=cache.columns,
     )
-    df.to_excel(cache.path, index=False)
+    write_excel_with_retry(df, cache.path, index=False)
     cache.dirty = False
     cache.dirty_updates = 0
     cache.last_flush_at = time.monotonic()
@@ -3174,6 +3183,10 @@ def build_processing_status_row(input_excel_path: str | Path, row_data: dict[str
         "final_target_countries": str(row_data.get("final_target_countries", "")),
         "recommendation_report_file": str(row_data.get("recommendation_report_file", "")),
         "direct_report_files": str(row_data.get("direct_report_files", "")),
+        TASK_SUMMARY_COLUMN: str(row_data.get(TASK_SUMMARY_COLUMN, "")),
+        TASK_COMPLETED_COLUMN: str(row_data.get(TASK_COMPLETED_COLUMN, "")),
+        TASK_FAILED_COLUMN: str(row_data.get(TASK_FAILED_COLUMN, "")),
+        TASK_REMAINING_COLUMN: str(row_data.get(TASK_REMAINING_COLUMN, "")),
         INPUT_FINGERPRINT_COLUMN: row_input_fingerprint(row_data),
         STATUS_COLUMN: str(row_data.get("process_status", "")),
         STATUS_AT_COLUMN: "",
@@ -3203,7 +3216,7 @@ def write_processing_status_rows(path: Path, rows: list[dict[str, str]]) -> None
         [{column: row.get(column, "") for column in PROCESSING_STATUS_COLUMNS} for row in rows],
         columns=PROCESSING_STATUS_COLUMNS,
     )
-    df.to_excel(path, index=False)
+    write_excel_with_retry(df, path, index=False)
 
 
 def update_report_task_status(
@@ -3240,8 +3253,121 @@ def update_report_task_status(
         if key not in cache.rows_by_key:
             cache.ordered_keys.append(key)
         cache.rows_by_key[key] = current_row
+        task_summary = summarize_report_tasks_for_row(row_data, _cache_rows(cache))
         _mark_workbook_cache_dirty(cache)
         _flush_workbook_cache_if_due(cache)
+
+    update_processing_task_summary(log_dir, row_data, task_summary)
+
+
+def summarize_report_tasks_for_row(row_data: dict[str, Any], task_rows: list[dict[str, str]]) -> dict[str, str]:
+    parent_key = report_task_parent_identity(build_report_task_row(row_data, "", ""))
+    rows = [
+        row
+        for row in task_rows
+        if report_task_parent_identity(row) == parent_key
+    ]
+    if not rows:
+        return {
+            TASK_SUMMARY_COLUMN: "",
+            TASK_COMPLETED_COLUMN: "",
+            TASK_FAILED_COLUMN: "",
+            TASK_REMAINING_COLUMN: "",
+        }
+
+    recommend_rows = [row for row in rows if str(row.get("task_type", "")) == TASK_TYPE_RECOMMEND]
+    direct_rows = [row for row in rows if str(row.get("task_type", "")) == TASK_TYPE_DIRECT]
+    summary_parts: list[str] = []
+
+    if recommend_rows:
+        recommend_status = str(recommend_rows[-1].get("status", "")).strip() or STATUS_PENDING
+        summary_parts.append(f"추천 {short_task_status(recommend_status)}")
+
+    if direct_rows:
+        counts = {
+            "완료": sum(1 for row in direct_rows if str(row.get("status", "")) == STATUS_SUCCESS),
+            "실패": sum(1 for row in direct_rows if task_is_failed(row)),
+            "처리중": sum(1 for row in direct_rows if str(row.get("status", "")) == STATUS_RUNNING),
+            "대기": sum(1 for row in direct_rows if task_is_pending(row)),
+        }
+        direct_parts = [f"{count}{label}" for label, count in counts.items() if count]
+        summary_parts.append("직접분석 " + (" ".join(direct_parts) if direct_parts else "대기"))
+
+    completed = [task_display_name(row) for row in rows if str(row.get("status", "")) == STATUS_SUCCESS]
+    failed = [task_display_name(row) for row in rows if task_is_failed(row)]
+    remaining = [task_display_name(row) for row in rows if str(row.get("status", "")) != STATUS_SUCCESS]
+
+    return {
+        TASK_SUMMARY_COLUMN: " / ".join(summary_parts),
+        TASK_COMPLETED_COLUMN: join_task_names(completed),
+        TASK_FAILED_COLUMN: join_task_names(failed),
+        TASK_REMAINING_COLUMN: join_task_names(remaining),
+    }
+
+
+def update_processing_task_summary(log_dir: str | Path, row_data: dict[str, Any], task_summary: dict[str, str]) -> None:
+    for column, value in task_summary.items():
+        row_data[column] = value
+
+    status_path = processing_status_path(log_dir)
+    normalized_path = _normalize_cache_path(status_path)
+    if normalized_path not in PROCESSING_STATUS_CACHES and not status_path.exists():
+        return
+
+    with PROCESSING_STATUS_LOCK:
+        cache = _load_processing_status_cache(status_path)
+        status_row_key = row_identity(build_processing_status_row(row_data.get(SOURCE_FILE_COLUMN, ""), row_data))
+        status_row = cache.rows_by_key.get(status_row_key)
+        if status_row is None:
+            return
+        status_row.update(task_summary)
+        _mark_workbook_cache_dirty(cache)
+        _flush_workbook_cache_if_due(cache)
+
+
+def report_task_parent_identity(row: dict[str, Any]) -> tuple[str, ...]:
+    return (
+        str(row.get(SOURCE_FILE_COLUMN, "")).strip(),
+        normalize_report_mode(row.get("report_mode", "")),
+        str(truthy(row.get("recommend_then_direct", False))),
+        str(row.get("row_index", "")).strip(),
+        str(row.get("hs_code", "")).strip(),
+        str(row.get("product_name", "")).strip(),
+        normalize_country_key(row.get("target_country", "")),
+        normalize_country_key(row.get("excluded_countries", "")),
+    )
+
+
+def short_task_status(status: str) -> str:
+    return {
+        STATUS_SUCCESS: "완료",
+        STATUS_FAILED: "실패",
+        STATUS_RETRY_PENDING: "재시도대기",
+        STATUS_RUNNING: "처리중",
+        STATUS_PENDING: "대기",
+        "": "대기",
+    }.get(status, status)
+
+
+def task_is_failed(row: dict[str, Any]) -> bool:
+    return str(row.get("status", "")) in {STATUS_FAILED, STATUS_RETRY_PENDING}
+
+
+def task_is_pending(row: dict[str, Any]) -> bool:
+    return str(row.get("status", "")) in {"", STATUS_PENDING}
+
+
+def task_display_name(row: dict[str, Any]) -> str:
+    task_type = str(row.get("task_type", ""))
+    if task_type == TASK_TYPE_RECOMMEND:
+        return "추천"
+    country = normalize_single_country(row.get("country", ""))
+    return country or "직접분석"
+
+
+def join_task_names(values: list[str]) -> str:
+    deduped = list(dict.fromkeys(value for value in values if value))
+    return ", ".join(deduped)
 
 
 def completed_report_task(
@@ -3328,7 +3454,7 @@ def write_report_task_rows(path: Path, rows: list[dict[str, str]]) -> None:
         [{column: row.get(column, "") for column in REPORT_TASK_COLUMNS} for row in rows],
         columns=REPORT_TASK_COLUMNS,
     )
-    df.to_excel(path, index=False)
+    write_excel_with_retry(df, path, index=False)
 
 
 def join_path_values(paths: list[Path]) -> str:
