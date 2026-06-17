@@ -378,6 +378,29 @@ class FilenamePatternTest(unittest.TestCase):
         self.assertEqual(statuses[(TASK_TYPE_DIRECT, "중국")], STATUS_RETRY_PENDING)
         self.assertEqual(statuses[(TASK_TYPE_DIRECT, "미국")], STATUS_SUCCESS)
 
+    def test_returned_to_form_does_not_save_failure_artifacts(self) -> None:
+        with TemporaryDirectory() as tmp_dir:
+            message = "보고서 생성 중 초기 입력 화면으로 돌아왔습니다."
+            with patch.object(automation, "download_report", side_effect=RuntimeError(message)), patch.object(
+                automation, "save_failure_artifacts"
+            ) as mocked_save:
+                with self.assertRaisesRegex(automation.GenerationError, "초기 입력 화면") as raised:
+                    automation.submit_and_download_report(
+                        object(),
+                        {"row_index": 1},
+                        Path(tmp_dir) / "downloads",
+                        Path(tmp_dir) / "logs",
+                        [],
+                        timeout_ms=1,
+                        retry_count=0,
+                        status_callback=None,
+                        force_stop_requested=None,
+                        filename_pattern="",
+                    )
+
+        self.assertEqual(raised.exception.artifacts, "")
+        mocked_save.assert_not_called()
+
     def test_failed_rows_restore_report_mode_options(self) -> None:
         with TemporaryDirectory() as tmp_dir:
             log_dir = Path(tmp_dir) / "logs"

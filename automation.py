@@ -1779,9 +1779,11 @@ def submit_and_download_report(
         except RuntimeError as exc:
             last_error = exc
             message = str(exc)
+            if "초기 입력 화면" in message:
+                raise GenerationError(message) from exc
+
             # 페이지를 더 조작하기 전에(화면이 바뀌기 전에) 실패 순간의 진단을 남긴다.
             fatal_markers = (
-                ("초기 입력 화면", "returned_to_form"),
                 ("생성 요청이 중단", "generation_aborted"),
                 ("생성이 멈춘", "generation_stalled"),
                 ("분석이 중단", "analysis_stopped"),
