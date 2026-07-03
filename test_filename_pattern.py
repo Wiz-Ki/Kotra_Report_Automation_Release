@@ -104,6 +104,12 @@ class FilenamePatternTest(unittest.TestCase):
     def test_splits_country_values(self) -> None:
         self.assertEqual(split_country_values("베트남, 미국/일본\n베트남"), ["베트남", "미국", "일본"])
 
+    def test_maps_country_name_aliases(self) -> None:
+        self.assertEqual(
+            split_country_values("러시아, 튀르키에/튀르키예"),
+            ["러시아연방", "튀르키예"],
+        )
+
     def test_normalizes_export_scale_with_mixed_amount_text(self) -> None:
         self.assertEqual(
             normalize_export_scale("성장기업($1,000,000 이상)"),

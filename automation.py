@@ -1309,6 +1309,12 @@ def truthy(value: Any) -> bool:
     return str(value or "").strip().lower() in {"1", "true", "yes", "y", "o", "on", "사용", "사용함", "켜짐"}
 
 
+COUNTRY_NAME_ALIASES = {
+    "러시아": "러시아연방",
+    "튀르키에": "튀르키예",
+}
+
+
 def split_country_values(value: Any) -> list[str]:
     text = str(value or "").strip()
     if not text:
@@ -1328,7 +1334,8 @@ def split_country_values(value: Any) -> list[str]:
 def normalize_single_country(value: Any) -> str:
     text = str(value or "").strip()
     text = re.sub(r"\s+", " ", text)
-    return text.strip(" ,")
+    text = text.strip(" ,")
+    return COUNTRY_NAME_ALIASES.get(normalize_country_key(text), text)
 
 
 def join_country_values(countries: list[str]) -> str:
