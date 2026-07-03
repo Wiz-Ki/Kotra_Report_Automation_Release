@@ -1835,6 +1835,8 @@ def truthy(value: Any) -> bool:
 # 대상국/제외국가 칸에 '-' 처럼 대시만 적은 값은 '희망 국가 없음' 의도의 플레이스홀더로 본다.
 COUNTRY_NONE_PLACEHOLDER_RE = re.compile(r"[-–—―－]+")
 COUNTRY_NAME_ALIASES = {
+    "러시아": "러시아연방",
+    "튀르키에": "튀르키예",
     "uae": "아랍에미리트",
     "unitedarabemirates": "아랍에미리트",
 }

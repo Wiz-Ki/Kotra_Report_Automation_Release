@@ -206,6 +206,12 @@ class FilenamePatternTest(unittest.TestCase):
             ["아랍에미리트", "미국"],
         )
 
+    def test_maps_country_name_aliases(self) -> None:
+        self.assertEqual(
+            split_country_values("러시아, 튀르키에/튀르키예"),
+            ["러시아연방", "튀르키예"],
+        )
+
     def test_normalizes_export_scale_with_mixed_amount_text(self) -> None:
         self.assertEqual(
             normalize_export_scale("성장기업($1,000,000 이상)"),
