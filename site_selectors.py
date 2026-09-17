@@ -10,13 +10,13 @@ SELECTORS = {
     "direct_analysis_button": "text=희망 국가 직접 분석",
 
     "hs_code_input": "input[placeholder*='6자리']",
-    "product_name_input": "input[placeholder*='음료']",
+    "product_name_input": "#itemName",
     "export_scale_dropdown": "xpath=//label[contains(normalize-space(.), '수출액 규모')]/following-sibling::button[@role='combobox'][1]",
 
     "export_experience_first": "text=처음입니다",
     "export_experience_has": "text=수출 경험 있음",
 
-    "target_country_input": "input[placeholder*='미국']",
+    "target_country_input": "#preferredCountry",
     "excluded_country_input": "xpath=//label[contains(normalize-space(.), '분석 제외 국가')]/following::input[1]",
     "excluded_country_add_button": "xpath=//input[@placeholder='제외할 국가명 입력']/following-sibling::button[1]",
     "market_analysis_section": "xpath=//*[contains(normalize-space(.), '국가별 시장 분석')]/ancestor::*[self::div or self::section][1]",
